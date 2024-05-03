@@ -71,12 +71,16 @@ six==1.16.0
     # via python-dateutil
 tenacity==8.0.1
     # via plotly
-tomli==2.0.0 # Comment
+tomli==2.0.0
     # via
     #   pylint
     #   pytest
-tqdm==4.64.0
+tqdm==4.66.3
     # via -r requirements.in
+typing-extensions==4.11.0
+    # via
+    #   astroid
+    #   pylint
 wcmatch==8.3
     # via -r requirements.in
 wrapt==1.13.3
