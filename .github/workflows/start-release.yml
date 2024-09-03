@@ -245,7 +245,7 @@ jobs:
     steps:
       - name: Download Release Body Artifact
         id: download_body
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4.1.7
         with:
           name: "release_body_${{ needs.release-setup.outputs.version }}"
           path: scripts/release
