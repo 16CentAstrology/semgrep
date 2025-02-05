@@ -6,7 +6,6 @@ import subprocess
 import sys
 from io import TextIOWrapper
 from pathlib import Path
-from textwrap import dedent
 from typing import Any
 from typing import Callable
 from typing import FrozenSet
@@ -14,6 +13,7 @@ from typing import List
 from typing import Optional
 from typing import Sequence
 from typing import TypeVar
+from typing import Union
 from urllib.parse import urlparse
 
 import click
@@ -22,10 +22,18 @@ from semgrep.constants import Colors
 from semgrep.constants import FIXTEST_SUFFIX
 from semgrep.constants import YML_SUFFIXES
 from semgrep.constants import YML_TEST_SUFFIXES
+from semgrep.semgrep_interfaces.semgrep_output_v1 import Sha1
 
 
 T = TypeVar("T")
 
+# The character which is used to mask out findings content which we don't want
+# to appear in logs. For instance, secrets findings and metavariable content
+# from a findings match is masked using this.
+MASK_CHAR = "*"
+# The amount in [0, 1] to show of matches which are subject to masking. If this
+# is 0.2, then 20% of the match (rounded down) is shown.
+MASK_SHOW_PCT = 0.2
 
 MAX_TEXT_WIDTH = 120
 
@@ -42,13 +50,68 @@ def is_rules(rules: str) -> bool:
     return rules[:6] == "rules:" or rules[:8] == '{"rules"'
 
 
-def path_has_permissions(path: Path, permissions: int) -> bool:
-    return path.exists() and path.stat().st_mode & permissions == permissions
+def is_truthy(value: Any) -> bool:
+    """
+    Returns True if the value is a truthy value, False otherwise.
+    """
+    val = str(value).lower()
+    return value is not None and val in ["true", "1", "y", "on", "yes"]
+
+
+def path_exists(path: Path, follow_symlinks: bool = True) -> bool:
+    """
+    path.exists(follow_links=False) is only supported with Python >= 12.
+    This provides the same functionality for older versions of Python.
+    Also, it returns False instead of raising exceptions in some situations.
+    """
+    try:
+        if follow_symlinks:
+            return path.exists()
+        else:
+            if path.is_symlink():
+                return True
+            else:
+                return path.exists()
+    except Exception:
+        return False
+
+
+def path_has_permissions(
+    path: Path, permissions: int, follow_symlinks: bool = True
+) -> bool:
+    return (
+        # path.stat(follow_symlinks=follow_symlinks): requires python >= 3.10
+        path_exists(path, follow_symlinks=follow_symlinks)
+        and (path.stat() if follow_symlinks else path.lstat()).st_mode & permissions
+        == permissions
+    )
 
 
 def abort(message: str) -> None:
     click.secho(message, fg="red", err=True)
     sys.exit(2)
+
+
+def has_color() -> bool:
+    """
+    Determine if color should be used in the output.
+
+    NOTE: This method shares logic with the `configure` method in `terminal.py`
+    and is intended to mimic the behavior without relying on internal state.
+    This could be a candidate TODO for refactoring to avoid duplication.
+    """
+    force_color = is_truthy(os.environ.get("SEMGREP_FORCE_COLOR"))
+    # See https://no-color.org/
+    no_color = is_truthy(os.environ.get("NO_COLOR")) or is_truthy(
+        os.environ.get("SEMGREP_FORCE_NO_COLOR")
+    )
+    # If both are force_color and no_color are set, force_color wins
+    if force_color and no_color:
+        return True
+    if no_color:
+        return False
+    # If force_color is set, use it. Otherwise, use color if stdout is a tty.
+    return force_color or sys.stdout.isatty()
 
 
 def with_color(
@@ -78,6 +141,31 @@ def with_color(
     )
 
 
+def with_logo_color(text: str) -> str:
+    """
+    Wrap text with our brand color if color is enabled.
+    Does not rely on internal state.
+    """
+    if has_color():
+        return click.style(text, fg=Colors.green.value)
+    return text
+
+
+def welcome() -> None:
+    """
+    Print a welcome message with the Semgrep logo.
+    """
+    logo = with_logo_color("○○○")
+    click.echo(
+        f"""
+┌──── {logo} ────┐
+│ Semgrep CLI │
+└─────────────┘
+""",
+        err=True,
+    )
+
+
 def terminal_wrap(text: str) -> str:
     from shutil import get_terminal_size
     import textwrap
@@ -91,7 +179,7 @@ def terminal_wrap(text: str) -> str:
     return "\n".join(wrapped_paras)
 
 
-def sub_check_output(cmd: List[str], **kwargs: Any) -> Any:
+def sub_check_output(cmd: Sequence[Union[str, Path]], **kwargs: Any) -> Any:
     """A simple proxy function to minimize and centralize subprocess usage."""
     from semgrep.state import get_state  # avoiding circular imports
 
@@ -187,49 +275,6 @@ def unit_str(count: int, unit: str, pad: bool = False) -> str:
     return f"{count} {unit}"
 
 
-def git_check_output(command: Sequence[str], cwd: Optional[str] = None) -> str:
-    """
-    Helper function to run a GIT command that prints out helpful debugging information
-    """
-    # Avoiding circular imports
-    from semgrep.error import SemgrepError
-    from semgrep.state import get_state
-
-    env = get_state().env
-
-    cwd = cwd if cwd is not None else os.getcwd()
-    try:
-        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use.dangerous-subprocess-use
-        return subprocess.check_output(
-            command,
-            stderr=subprocess.PIPE,
-            encoding="utf-8",
-            timeout=env.git_command_timeout,
-            cwd=cwd,
-        ).strip()
-    except subprocess.CalledProcessError as e:
-        command_str = " ".join(command)
-        raise SemgrepError(
-            dedent(
-                f"""
-                Command failed with exit code: {e.returncode}
-                -----
-                Command failed with output:
-                {e.stderr}
-
-                Failed to run '{command_str}'. Possible reasons:
-
-                - the git binary is not available
-                - the current working directory is not a git repository
-                - the current working directory is not marked as safe
-                    (fix with `git config --global --add safe.directory $(pwd)`)
-
-                Try running the command yourself to debug the issue.
-                """
-            ).strip()
-        )
-
-
 def read_range(fd: TextIOWrapper, start_offset: int, end_offset: int) -> str:
     """
     Takes a file descriptor and returns the text between the offsets. Start
@@ -244,7 +289,7 @@ def read_range(fd: TextIOWrapper, start_offset: int, end_offset: int) -> str:
     return fd.read(length)
 
 
-def get_lines(
+def get_lines_from_file(
     path: Path,
     start_line: int,
     end_line: int,
@@ -267,3 +312,43 @@ def get_lines(
         result = list(itertools.islice(fd, start_line, end_line))
 
     return result
+
+
+def get_lines_from_git_blob(
+    blob_sha: Sha1,
+    start_line: int,
+    end_line: int,
+) -> List[str]:
+    """
+    Return lines in the given git blob. Result is cached since calling git
+    multiple times may be expensive and the contents of a blob are stable
+    (addressed by sha), since (among other reasons) the sha is directly related
+    to the content.
+
+    Assumes blob exists.
+    """
+    # Avoid circular import
+    from semgrep.git import git_check_output
+
+    # Start and end line are one-indexed, but the subsequent slice call is
+    # inclusive for start and exclusive for end, so only subtract from start
+    start_line = start_line - 1
+
+    if start_line == -1 and end_line == 0:
+        # Completely empty file
+        return []
+
+    contents = git_check_output(["git", "cat-file", "blob", blob_sha.value])
+    return list(itertools.islice(contents.splitlines(), start_line, end_line))
+
+
+def with_feature_status(*, enabled: bool = False) -> str:
+    """
+    Returns the status of a feature with an icon indicator
+      - enabled:   a green checkmark (✔)
+      - otherwise: a red (x)
+    """
+    # NOTE: we could use something simple like `click.secho("✔", fg="green", nl=False)`
+    # but we have a custom flag for forcing color off (i.e. `force_color_off`)
+    # that we need to respect.
+    return with_color(Colors.green, "✔") if enabled else with_color(Colors.red, "✘")

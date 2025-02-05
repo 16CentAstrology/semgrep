@@ -6,7 +6,8 @@ Developers should consult the makefiles, which are documented.
 The steps to set up and build everything are normally:
 
 ```
-$ make dev-setup   # meant to be run infrequently, may not be sufficient
+$ git submodule update --init --recursive
+$ make setup       # meant to be run infrequently, may not be sufficient
 $ make             # routine build
 $ make test        # test everything
 ```
@@ -38,9 +39,8 @@ The Semgrep project has two main parts:
 - The Python wrapper in the [`cli/`](cli) folder, which has its own
   makefile needed for some preprocessing and for testing.
   Read the makefile to see what targets are available.
-- The OCaml core in the [`semgrep-core/`](semgrep-core) folder, which
-  also has its own makefile. Read the makefile to see what's
-  available to the developer.
+- The OCaml core in the [`src/`](semgrep-core) folder.
+  Read the toplevel makefile to see what's available to the developer.
 
 ## Reproducible and standalone build with Docker
 

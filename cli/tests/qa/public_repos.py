@@ -23,8 +23,8 @@ class Repo(NamedTuple):
 
 
 REPOS = [
-    Repo("https://github.com/apache/airflow"),
-    Repo("https://github.com/zulip/zulip"),
+    # FIXME: Syntax errors in typescript. I made a linear task.
+    # Repo("https://github.com/apache/airflow"),
     Repo("https://github.com/coinbase/bifrost"),
     Repo("https://github.com/coinbase/bip38"),
     Repo("https://github.com/coinbase/btcexport"),
@@ -68,13 +68,11 @@ REPOS = [
     Repo("https://github.com/dropbox/dropbox-sdk-python"),
     Repo("https://github.com/dropbox/dropbox_hook"),
     Repo("https://github.com/dropbox/emmer"),
-    Repo("https://github.com/dropbox/firebase-dropbox-oauth"),
     Repo("https://github.com/dropbox/git-rbr"),
     Repo("https://github.com/dropbox/PyHive"),
     Repo("https://github.com/dropbox/goebpf"),
     Repo("https://github.com/dropbox/goprotoc"),
     Repo("https://github.com/dropbox/grallama-panel"),
-    Repo("https://github.com/dropbox/groupy"),
     Repo("https://github.com/dropbox/hermes"),
     Repo("https://github.com/dropbox/hocrux"),
     Repo("https://github.com/dropbox/hydra"),
@@ -82,7 +80,6 @@ REPOS = [
     Repo("https://github.com/dropbox/llama-archive"),
     Repo("https://github.com/dropbox/load_management"),
     Repo("https://github.com/dropbox/mdwebhook"),
-    Repo("https://github.com/dropbox/merou"),
     Repo("https://github.com/dropbox/mypy-PyCharm-plugin"),
     Repo("https://github.com/dropbox/mypy-protobuf"),
     Repo("https://github.com/dropbox/nsot"),
@@ -110,7 +107,6 @@ REPOS = [
     Repo("https://github.com/dropbox/zinger"),
     Repo("https://github.com/seemoo-lab/opendrop"),
     Repo("https://github.com/lightstep/lightstep-tracer-python"),
-    Repo("https://github.com/draios/sysdig-inspect"),
     Repo("https://github.com/getsentry/sentry-python"),
     Repo("https://github.com/signalapp/signal-webrtc-ios"),
     Repo("https://github.com/secdev/scapy"),
@@ -138,9 +134,19 @@ REPOS = [
     Repo("https://github.com/OWASP/NodeGoat"),
     Repo("https://github.com/dropbox/questions"),
     Repo("https://github.com/coinbase/gtt-ui"),
-    Repo("https://github.com/DevSlop/Pixi"),
-    Repo("https://github.com/home-assistant/home-assistant"),
+    Repo(
+        "https://github.com/DevSlop/Pixi",
+        xfail_reason="DevSlop-Pixi/app/public/api-docs/ contains some minified JS files that cause Semgrep to timeout, so the output will contain some errors.",
+    ),
+    Repo(
+        "https://github.com/home-assistant/home-assistant",
+        xfail_reason="Lack of support for match statement in Python",
+    ),
     Repo("https://github.com/we45/Vulnerable-Flask-App"),
+    Repo(
+        "https://github.com/draios/sysdig-inspect",
+        xfail_reason="Merge conflicts on `dev`, see https://github.com/draios/sysdig-inspect/blob/ee3b8fa9335bf6fc19fd0976d51d87b961db6ebb/testem.js",
+    ),
     Repo(
         "https://github.com/rails/rails",
         ["ruby"],
@@ -183,6 +189,11 @@ REPOS = [
     Repo("https://github.com/gitlabhq/gitlabhq", ["ruby"], xfail_reason="unknown"),
     Repo(
         "https://github.com/bkimminich/juice-shop",
+        ["javascript", "typescript"],
+        xfail_reason="Failure to parse typescript",
+    ),
+    Repo(
+        "https://github.com/zulip/zulip",
         ["javascript", "typescript"],
         xfail_reason="Failure to parse typescript",
     ),

@@ -42,6 +42,16 @@ class ErrorHandler:
     def pop_request(self) -> None:
         self.payload = {}
 
+    def capture_error(self, e: Optional[BaseException] = None) -> None:
+        import traceback
+
+        if sys.exc_info()[0] is not None:
+            self.payload["error"] = "".join(traceback.format_exc())
+        elif e is not None:
+            exc_type = e.__class__
+            tb = e.__traceback__
+            self.payload["error"] = "".join(traceback.format_exception(exc_type, e, tb))
+
     @property
     def is_enabled(self) -> bool:
         """
@@ -67,10 +77,14 @@ class ErrorHandler:
         ):
             return exit_code
 
-        import traceback
+        url = f"{state.env.fail_open_url}/failure"
+
+        logger.error(
+            "There were errors during analysis but Semgrep will succeed because there were no blocking findings, use --no-suppress-errors if you want Semgrep to fail when there are errors."
+        )
 
         logger.debug(
-            f"Sending to fail-open endpoint {state.env.fail_open_url} since fail-open is configured to {self.suppress_errors}"
+            f"Sending to fail-open endpoint {url} since fail-open is configured to {self.suppress_errors}"
         )
 
         token = auth.get_token()
@@ -78,12 +92,15 @@ class ErrorHandler:
             "User-Agent": str(state.app_session.user_agent),
             "Authorization": f"Bearer {token or ''}",
         }
-        if sys.exc_info()[0] is not None:
-            self.payload["error"] = traceback.format_exc()
+        if "error" not in self.payload:
+            self.capture_error()
+
+        self.payload["request_id"] = str(state.local_scan_id)
+        self.payload["exit_code"] = exit_code
+
         try:
-            requests.post(
-                state.env.fail_open_url, headers=headers, json=self.payload, timeout=3
-            )
+            requests.post(url, headers=headers, json=self.payload, timeout=3)
         except Exception as e:
-            logger.error(f"Error sending to fail-open endpoint: {e}")
+            logger.debug(f"Error sending to fail-open endpoint: {e}")
+
         return 0

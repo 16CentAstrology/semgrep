@@ -5,10 +5,10 @@
 # Usage:
 #   $ ./scripts/generate-cheatsheet
 #
-# or more explicitely:
+# or more explicitly:
 #   $ cd cli
 #   $ pipenv run ../scripts/generate_cheatsheet.py --json --directory \
-#     ../semgrep-core/tests --output-file cheatsheet.json
+#     ../tests --output-file cheatsheet.json
 #
 #
 # If you add support for a new language, you may need to update
@@ -555,6 +555,10 @@ def lang_dir_to_ext(lang: str):
         "csharp": "cs",
         "rust": "rs",
         "solidity": "sol",
+        "elixir": "ex",
+        "kotlin": "kt",
+        "terraform": "tf",
+        "julia": "jl",
     }
     return LANG_DIR_TO_EXT.get(lang, lang)
 

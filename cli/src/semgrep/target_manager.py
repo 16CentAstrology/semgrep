@@ -22,12 +22,9 @@ from typing import Set
 from typing import Tuple
 from typing import Union
 
-from semdep.find_lockfiles import ECOSYSTEM_TO_LOCKFILES
-from semdep.find_lockfiles import LOCKFILE_TO_MANIFEST
-from semdep.parse_lockfile import parse_lockfile_str
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
+from semdep.subproject_matchers import filter_dependency_source_files
 from semgrep.git import BaselineHandler
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
-from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
 
 # usually this would be a try...except ImportError
 # but mypy understands only this
@@ -45,9 +42,10 @@ from attrs import Factory, frozen
 from wcmatch import glob as wcglob
 from boltons.iterutils import partition
 
+from semgrep.constants import TOO_MUCH_DATA
 from semgrep.constants import Colors, UNSUPPORTED_EXT_IGNORE_LANGS
-from semgrep.error import FilesNotFoundError
-from semgrep.formatter.text import width
+from semgrep.error import InvalidScanningRootError
+from semgrep.formatter.text import BASE_WIDTH as width
 from semgrep.ignores import FileIgnore
 from semgrep.semgrep_types import FileExtension
 from semgrep.semgrep_types import LANGUAGE
@@ -58,10 +56,16 @@ from semgrep.util import path_has_permissions, sub_check_output
 from semgrep.util import with_color
 from semgrep.verbose_logging import getLogger
 
+
 logger = getLogger(__name__)
 
 MAX_CHARS_TO_READ_FOR_SHEBANG = 255
 PATHS_ALWAYS_SKIPPED = (".git",)
+
+SCA_PRODUCT = out.Product(out.SCA())
+SAST_PRODUCT = out.Product(out.SAST())
+SECRETS_PRODUCT = out.Product(out.Secrets())
+ALL_PRODUCTS = (SAST_PRODUCT, SCA_PRODUCT, SECRETS_PRODUCT)
 
 ALL_EXTENSIONS: Collection[FileExtension] = {
     ext
@@ -71,30 +75,35 @@ ALL_EXTENSIONS: Collection[FileExtension] = {
 }
 
 
-def write_pipes_to_disk(targets: Sequence[str], temp_dir: Path) -> Sequence[str]:
+def write_pipes_to_disk(scanning_roots: Sequence[str], temp_dir: Path) -> Sequence[str]:
     """
     Writes FIFOs into temp files
 
     This is necessary as we can not easily rewire these pipes into the called semgrep-core
     process.
 
-    :param targets: Input target specifiers
+    :param scanning_roots: Input scanning root specifiers (files, folders, '-', ...)
     """
 
-    out_targets = []
-    for t in targets:
+    out_scanning_roots = []
+    for t in scanning_roots:
+        path = Path(t)
         if t == "-":
             with (temp_dir / "stdin").open("wb") as fd:
                 fd.write(sys.stdin.buffer.read())
-            out_targets.append(fd.name)
-        elif Path(t).is_fifo():
-            with (temp_dir / t[1:].replace("/", "_")).open("wb") as fd:
-                with Path(t).open("rb") as td:
-                    fd.write(td.read())
-            out_targets.append(fd.name)
+            out_scanning_roots.append(fd.name)
         else:
-            out_targets.append(t)
-    return out_targets
+            if os.access(path, os.R_OK) and path.is_fifo():
+                with (temp_dir / t[1:].replace("/", "_")).open("wb") as fd:
+                    with Path(t).open("rb") as td:
+                        fd.write(td.read())
+                out_scanning_roots.append(fd.name)
+            else:
+                # We keep the scanning root even if we already
+                # know it doesn't exist. This will be reported cleanly
+                # later.
+                out_scanning_roots.append(t)
+    return out_scanning_roots
 
 
 @define
@@ -112,16 +121,19 @@ class FileTargetingLog:
     always_skipped: Set[Path] = Factory(set)
     cli_includes: Set[Path] = Factory(set)
     cli_excludes: Set[Path] = Factory(set)
+    insufficient_permissions: Set[Path] = Factory(set)
     size_limit: Set[Path] = Factory(set)
 
     # "None" indicates that all lines were skipped
-    core_failure_lines_by_file: Mapping[Path, Optional[int]] = Factory(dict)
+    core_failure_lines_by_file: Mapping[
+        Path, Tuple[Optional[int], List[out.RuleId]]
+    ] = Factory(dict)
 
     # Indicates which files were NOT scanned by each language
     # e.g. for python, should be a list of all non-python-compatible files
-    by_language: Dict[Union[Language, Ecosystem], Set[Path]] = Factory(
-        lambda: defaultdict(set)
-    )
+    by_language: Dict[
+        Union[Language, Literal["dependency_source_files"]], Set[Path]
+    ] = Factory(lambda: defaultdict(set))
     rule_includes: Dict[str, Set[Path]] = Factory(lambda: defaultdict(set))
     rule_excludes: Dict[str, Set[Path]] = Factory(lambda: defaultdict(set))
 
@@ -147,6 +159,22 @@ class FileTargetingLog:
             else self.target_manager.get_all_files()
         )
 
+    def list_skipped_paths_with_reason(self) -> List[Tuple[Path, str]]:
+        res: List[Tuple[Path, str]] = []
+        # The strings used to describe the reason are those defined
+        # in semgrep_output_v1.atd for type 'skip_reason':
+        for x in self.always_skipped:
+            res.append((x, "always_skipped"))
+        for x in self.cli_includes:
+            res.append((x, "cli_include_flags_do_not_match"))
+        for x in self.cli_excludes:
+            res.append((x, "cli_exclude_flags_match"))
+        for x in self.insufficient_permissions:
+            res.append((x, "insufficient_permissions"))
+        for x in self.size_limit:
+            res.append((x, "exceeded_size_limit"))
+        return sorted(res)
+
     def __str__(self) -> str:
         limited_fragments = []
         skip_fragments = []
@@ -162,7 +190,7 @@ class FileTargetingLog:
             # need to check if any target is a git repo and not just the cwd
             targets_not_in_git = 0
             dir_targets = 0
-            for t in self.target_manager.targets:
+            for t in self.target_manager.scanning_roots:
                 if t.path.is_dir():
                     dir_targets += 1
                     try:
@@ -181,17 +209,25 @@ class FileTargetingLog:
             skip_fragments.append(
                 f"{len(self.cli_excludes)} files matching --exclude patterns"
             )
+        if self.insufficient_permissions:
+            # Show a list of broken symlinks or files we can't open for reading.
+            # This is a best effort. What we can show depends on the method
+            # used to list the files.
+            skip_fragments.append(
+                f"{len(self.insufficient_permissions)} files without read access"
+            )
         if self.size_limit:
             skip_fragments.append(
                 f"{len(self.size_limit)} files larger than {self.target_manager.max_target_bytes / 1000 / 1000} MB"
             )
+
         if self.semgrepignored:
             skip_fragments.append(
                 f"{len(self.semgrepignored)} files matching .semgrepignore patterns"
             )
         if self.core_failure_lines_by_file:
             partial_fragments.append(
-                f"{len(self.core_failure_lines_by_file)} files only partially analyzed due to a parsing or internal Semgrep error"
+                f"{len(self.core_failure_lines_by_file)} files only partially analyzed due to parsing or internal Semgrep errors"
             )
 
         if not limited_fragments and not skip_fragments and not partial_fragments:
@@ -209,7 +245,9 @@ class FileTargetingLog:
         message += "\n"
         return message
 
-    def yield_verbose_lines(self) -> Iterator[Tuple[Literal[0, 1, 2], str]]:
+    def yield_verbose_lines(
+        self, too_many_entries: int
+    ) -> Iterator[Tuple[Literal[0, 1, 2], str]]:
         """Yields lines of verbose output for the skipped files.
 
         The returned tuple is (level, message).
@@ -219,7 +257,7 @@ class FileTargetingLog:
 
         yield 1, "Always skipped by Semgrep:"
         if self.always_skipped:
-            for path in self.always_skipped:
+            for path in sorted(self.always_skipped):
                 yield 2, with_color(Colors.cyan, str(path))
         else:
             yield 2, "<none>"
@@ -233,49 +271,82 @@ class FileTargetingLog:
             yield 2, "<none>"
 
         yield 1, "Skipped by .semgrepignore:"
-        yield 1, "(See: https://semgrep.dev/docs/ignoring-files-folders-code/#understanding-semgrep-defaults)"
+        yield (
+            1,
+            "- https://semgrep.dev/docs/ignoring-files-folders-code/#understand-semgrep-defaults",
+        )
         if self.semgrepignored:
-            for path in self.semgrepignored:
-                yield 2, with_color(Colors.cyan, str(path))
+            if too_many_entries > 0 and len(self.semgrepignored) > too_many_entries:
+                yield 2, TOO_MUCH_DATA
+            else:
+                for path in sorted(self.semgrepignored):
+                    yield 2, with_color(Colors.cyan, str(path))
         else:
             yield 2, "<none>"
 
         yield 1, "Skipped by --include patterns:"
         if self.cli_includes:
-            for path in self.cli_includes:
+            for path in sorted(self.cli_includes):
                 yield 2, with_color(Colors.cyan, str(path))
         else:
             yield 2, "<none>"
 
         yield 1, "Skipped by --exclude patterns:"
         if self.cli_excludes:
-            for path in self.cli_excludes:
+            if too_many_entries > 0 and len(self.cli_excludes) > too_many_entries:
+                yield 2, TOO_MUCH_DATA
+            else:
+                for path in sorted(self.cli_excludes):
+                    yield 2, with_color(Colors.cyan, str(path))
+        else:
+            yield 2, "<none>"
+
+        yield (
+            1,
+            f"Files that couldn't be accessed:",
+        )
+        if self.insufficient_permissions:
+            for path in sorted(self.insufficient_permissions):
                 yield 2, with_color(Colors.cyan, str(path))
         else:
             yield 2, "<none>"
 
-        yield 1, f"Skipped by limiting to files smaller than {self.target_manager.max_target_bytes} bytes:"
+        yield (
+            1,
+            f"Skipped by limiting to files smaller than {self.target_manager.max_target_bytes} bytes:",
+        )
         yield 1, "(Adjust with the --max-target-bytes flag)"
         if self.size_limit:
-            for path in self.size_limit:
+            for path in sorted(self.size_limit):
                 yield 2, with_color(Colors.cyan, str(path))
         else:
             yield 2, "<none>"
 
-        yield 1, "Skipped by analysis failure due to parsing or internal Semgrep error"
+        yield 1, "Partially analyzed due to parsing or internal Semgrep errors"
         if self.core_failure_lines_by_file:
-            for path, lines in self.core_failure_lines_by_file.items():
+            for path, (lines, rule_ids) in sorted(
+                self.core_failure_lines_by_file.items()
+            ):
+                num_rule_ids = len(rule_ids) if rule_ids else 0
+                if num_rule_ids == 0:
+                    with_rule = ""
+                elif num_rule_ids == 1:
+                    with_rule = f" with rule {rule_ids[0].value}"
+                else:
+                    with_rule = f" with {num_rule_ids} rules (e.g. {rule_ids[0].value})"
                 if lines is None:
-                    skipped = "all"
+                    # No lines does not mean all lines, we simply don't know how many.
+                    # TODO: Maybe for parsing errors this would mean all lines?
+                    lines_skipped = ""
                 else:
                     # TODO: use pluralization library
-                    skipped = str(lines)
+                    lines_skipped = f" ({lines} lines skipped)"
 
-                yield 2, with_color(Colors.cyan, f"{path} ({skipped} lines skipped)")
+                yield 2, with_color(Colors.cyan, f"{path}{with_rule}{lines_skipped}")
         else:
             yield 2, "<none>"
 
-    def verbose_output(self) -> str:
+    def verbose_output(self, too_many_entries: int) -> str:
         formatters_by_level: Mapping[int, Callable[[str], str]] = {
             0: lambda line: "\n".join([40 * "=", line, 40 * "="]),
             1: lambda line: click.wrap_text(
@@ -296,7 +367,7 @@ class FileTargetingLog:
         output = ""
 
         prev_level = None
-        for level, line in self.yield_verbose_lines():
+        for level, line in self.yield_verbose_lines(too_many_entries):
             if prev_level != level:
                 output += "\n"
             formatter = formatters_by_level[level]
@@ -305,7 +376,10 @@ class FileTargetingLog:
 
         return output
 
+    # TODO: return directly a out.SkippedTarget
     def yield_json_objects(self) -> Iterable[Dict[str, Any]]:
+        # coupling: if you add a reason here,
+        # add it also to semgrep_output_v1.atd.
         for path in self.always_skipped:
             yield {"path": str(path), "reason": "always_skipped"}
         for path in self.semgrepignored:
@@ -314,6 +388,8 @@ class FileTargetingLog:
             yield {"path": str(path), "reason": "cli_include_flags_do_not_match"}
         for path in self.cli_excludes:
             yield {"path": str(path), "reason": "cli_exclude_flags_match"}
+        for path in self.insufficient_permissions:
+            yield {"path": str(path), "reason": "insufficient_permissions"}
         for path in self.size_limit:
             yield {
                 "path": str(path),
@@ -328,10 +404,10 @@ class FileTargetingLog:
 
 
 @frozen(eq=False)  #
-class Target:
+class ScanningRoot:
     """
-    Represents one path that was given as a target.
-    Then target.paths returns all paths that target expands to.
+    Represents one path that was given as a scanning root.
+    Then scanning_root.paths returns all target paths it expands to.
     This does not do any include/exclude filtering.
 
     Three strategies are available for gathering targets:
@@ -352,12 +428,15 @@ class Target:
         If not, the path might be a socket.
         """
         if not self._is_valid_file_or_dir(value):
-            raise FilesNotFoundError(paths=tuple([value]))
+            raise InvalidScanningRootError(paths=tuple([value]))
         return None
 
     def _is_valid_file_or_dir(self, path: Path) -> bool:
         """Check this is a valid file or directory for semgrep scanning."""
-        return path_has_permissions(path, stat.S_IRUSR) and not path.is_symlink()
+        return (
+            path_has_permissions(path, stat.S_IRUSR, follow_symlinks=False)
+            and not path.is_symlink()
+        )
 
     def _is_valid_file(self, path: Path) -> bool:
         """Check if file is a readable regular file.
@@ -370,9 +449,9 @@ class Target:
         """
         return self._is_valid_file_or_dir(path) and path.is_file()
 
-    def _parse_git_output(self, output: str) -> FrozenSet[Path]:
+    def _parse_git_output_nulsep(self, output: str) -> FrozenSet[Path]:
         """
-        Convert a newline delimited list of files to a set of path objects
+        Convert a null-delimited list of files to a set of path objects
         prepends curr_dir to all paths in said list
 
         If list is empty then returns an empty set
@@ -382,7 +461,7 @@ class Target:
         if output:
             files = frozenset(
                 p
-                for p in (self.path / elem for elem in output.strip().split("\n"))
+                for p in (self.path / elem for elem in output.split("\x00") if elem)
                 if self._is_valid_file(p)
             )
         return files
@@ -401,51 +480,71 @@ class Target:
         git ls-files is significantly faster than os.walk when performed on a git project,
         so identify the git files first, then filter those
         """
+        # Instead of crashing when we encounter a file with non utf-8 characters, we replace invalid
+        # characters e.g if 'c' was not a utf-8 char then abc.ml -> ab?.ml. Since ab?.ml doesn't
+        # exist, the file abc.ml will not be processed, and any attempts to access ab?.ml by semgrep
+        # later is handled properly.
         run_git_command = partial(
             sub_check_output,
             cwd=self.path.resolve(),
             encoding="utf-8",
+            errors="replace",
             stderr=subprocess.DEVNULL,
         )
 
         # Tracked files
-        tracked_output = run_git_command(["git", "ls-files"])
+        tracked_output = run_git_command(["git", "ls-files", "-z"])
 
         # Untracked but not ignored files
         untracked_output = run_git_command(
             [
                 "git",
                 "ls-files",
-                "--other",
+                "-z",
+                "--others",
                 "--exclude-standard",
             ]
         )
 
-        deleted_output = run_git_command(["git", "ls-files", "--deleted"])
-        tracked = self._parse_git_output(tracked_output)
-        untracked_unignored = self._parse_git_output(untracked_output)
-        deleted = self._parse_git_output(deleted_output)
+        deleted_output = run_git_command(["git", "ls-files", "-z", "--deleted"])
+        tracked = self._parse_git_output_nulsep(tracked_output)
+        untracked_unignored = self._parse_git_output_nulsep(untracked_output)
+        deleted = self._parse_git_output_nulsep(deleted_output)
         return frozenset(tracked | untracked_unignored - deleted)
 
-    def files_from_filesystem(self) -> FrozenSet[Path]:
-        return frozenset(
-            match
-            for match in self.path.glob("**/*")
-            if match.is_file() and not match.is_symlink()
+    def files_from_filesystem(self) -> Tuple[FrozenSet[Path], FrozenSet[Path]]:
+        all = frozenset(match for match in self.path.glob("**/*"))
+        # We need to check for access permission before checking file kind
+        insufficient_permissions = frozenset(
+            match for match in all if not os.access(match, os.R_OK)
         )
+        access_ok = all - insufficient_permissions
+        regular_files = frozenset(
+            match for match in access_ok if match.is_file() and not match.is_symlink()
+        )
+        return (regular_files, insufficient_permissions)
 
     @lru_cache(maxsize=None)
-    def files(self) -> FrozenSet[Path]:
+    def _files(
+        self, ignore_baseline_handler: bool = False
+    ) -> Tuple[FrozenSet[Path], FrozenSet[Path]]:
         """
         Recursively go through a directory and return list of all files with
-        default file extension of language
+        default file extension of language.
+        Return the selected files and the files with insufficient permissions.
+
+        ignore_baseline_handler: if True, will ignore the baseline handler and scan all files. Used in the context of scanning unchanged lockfiles for their dependencies and doing reachability analysis.
         """
         if not self.path.is_dir() and self.path.is_file():
-            return frozenset([self.path])
+            return (frozenset([self.path]), frozenset())
 
         if self.baseline_handler is not None:
+            # Adding this conditional to scan all lockfiles for their dependencies, even in diff-aware scans
+            if ignore_baseline_handler:
+                return self.files_from_filesystem()
+
             try:
-                return self.files_from_git_diff()
+                return (self.files_from_git_diff(), frozenset())
             except (subprocess.CalledProcessError, FileNotFoundError):
                 logger.verbose(
                     f"Unable to target only the changed files since baseline commit. Running on all git tracked files instead..."
@@ -453,7 +552,7 @@ class Target:
 
         if self.git_tracked_only:
             try:
-                return self.files_from_git_ls()
+                return (self.files_from_git_ls(), frozenset())
             except (subprocess.CalledProcessError, FileNotFoundError):
                 logger.verbose(
                     f"Unable to ignore files ignored by git ({self.path} is not a git directory or git is not installed). Running on all files instead..."
@@ -461,13 +560,29 @@ class Target:
 
         return self.files_from_filesystem()
 
+    # cached (see _files())
+    def files(self, ignore_baseline_handler: bool = False) -> FrozenSet[Path]:
+        selected, _insufficient_permissions = self._files(
+            ignore_baseline_handler=ignore_baseline_handler
+        )
+        return selected
+
+    # cached (see _files())
+    def paths_with_insufficient_permissions(
+        self, ignore_baseline_handler: bool = False
+    ) -> FrozenSet[Path]:
+        _selected, insufficient_permissions = self._files(
+            ignore_baseline_handler=ignore_baseline_handler
+        )
+        return insufficient_permissions
+
 
 @define(eq=False)
 class TargetManager:
     """
     Handles all file include/exclude logic for semgrep
 
-    Assumes file system does not change during it's existence to cache
+    Assumes file system does not change during its existence to cache
     files for a given language etc. If file system changes (i.e. git checkout),
     create a new TargetManager object
 
@@ -478,34 +593,36 @@ class TargetManager:
     changed since that commit
 
     If allow_unknown_extensions is set then targets with extensions that are
-    not understood by semgrep will always be returned by get_files. Else will discard
-    targets with unknown extensions
+    not understood by semgrep will always be returned by get_files when searching for
+    code targets. Else will discard targets with unknown extensions. Unknown
+    extensions are never returned when looking for manifest/lockfile targets.
 
     TargetManager not to be confused with https://jobs.target.com/search-jobs/store%20manager
     """
 
-    target_strings: Sequence[str]
+    scanning_root_strings: FrozenSet[Path]
     includes: Sequence[str] = Factory(list)
-    excludes: Sequence[str] = Factory(list)
+    excludes: Mapping[out.Product, Sequence[str]] = Factory(dict)
     max_target_bytes: int = -1
     respect_git_ignore: bool = False
+    respect_rule_paths: bool = True
     baseline_handler: Optional[BaselineHandler] = None
     allow_unknown_extensions: bool = False
-    file_ignore: Optional[FileIgnore] = None
-    lockfile_scan_info: Dict[str, int] = {}
+    ignore_profiles: Mapping[out.Product, FileIgnore] = Factory(dict)
     ignore_log: FileTargetingLog = Factory(FileTargetingLog, takes_self=True)
-    targets: Sequence[Target] = field(init=False)
+    scanning_roots: Sequence[ScanningRoot] = field(init=False)
+    respect_semgrepignore: bool = True
 
     _filtered_targets: Dict[Language, FilteredFiles] = field(factory=dict)
 
     def __attrs_post_init__(self) -> None:
-        self.targets = [
-            Target(
-                target,
+        self.scanning_roots = [
+            ScanningRoot(
+                root,
                 git_tracked_only=self.respect_git_ignore,
                 baseline_handler=self.baseline_handler,
             )
-            for target in self.target_strings
+            for root in self.scanning_root_strings
         ]
         return None
 
@@ -516,7 +633,7 @@ class TargetManager:
         In semgrep, pattern "foo/bar" should match paths "x/foo/bar", "foo/bar/x", and
         "x/foo/bar/x". It implicitly matches zero or more directories at the beginning and the end
         of the pattern. In contrast, we have to explicitly specify the globstar (**) patterns in
-        wcmatch. This function will converts a pattern "foo/bar" into "**/foo/bar" and
+        wcmatch. This function will convert a pattern "foo/bar" into "**/foo/bar" and
         "**/foo/bar/**". We need the pattern without the trailing "/**" because "foo/bar.py/**"
         won't match "foo/bar.py".
         """
@@ -559,15 +676,17 @@ class TargetManager:
         return cast(List[Path], result)
 
     def filter_by_language(
-        self, language: Union[Language, Ecosystem], *, candidates: FrozenSet[Path]
+        self,
+        language: Union[None, Language],
+        *,
+        candidates: FrozenSet[Path],
     ) -> FilteredFiles:
         """
-        Returns only paths that have the correct extension or shebang, or are the correct lockfile format
+        Returns only paths that have the correct extension or shebang
 
         Finds all files in a collection of paths that either:
         - end with one of a set of extension
         - is a script that executes with one of a set of programs
-        - are lockfiles associated with a given ecosystem
         """
         if isinstance(language, Language):
             kept = frozenset(
@@ -577,14 +696,7 @@ class TargetManager:
                 or self.executes_with_shebang(path, language.definition.shebangs)
             )
         else:
-            kept = frozenset(
-                path
-                for path in candidates
-                if any(
-                    str(path.parts[-1]) == lockfile_name
-                    for lockfile_name in ECOSYSTEM_TO_LOCKFILES[language]
-                )
-            )
+            kept = frozenset(candidates)
         return FilteredFiles(kept, frozenset(candidates - kept))
 
     def filter_known_extensions(self, *, candidates: FrozenSet[Path]) -> FilteredFiles:
@@ -632,6 +744,23 @@ class TargetManager:
         return FilteredFiles(frozenset(candidates - removed), frozenset(removed))
 
     @staticmethod
+    def filter_by_permission(candidates: FrozenSet[Path]) -> FilteredFiles:
+        """
+        Exclude files we can't read
+        """
+        # TODO: os.access() returns True if the user is root, even if the
+        # effective user ID is unpriviledged and results in the file
+        # being not readable!
+        # This is a problem when running pysemgrep as root but only if the
+        # euid is different from the uid.
+        kept, removed = partition(
+            candidates,
+            lambda path: os.access(path, os.R_OK),
+        )
+
+        return FilteredFiles(frozenset(kept), frozenset(removed))
+
+    @staticmethod
     def filter_by_size(
         max_target_bytes: int, *, candidates: FrozenSet[Path]
     ) -> FilteredFiles:
@@ -646,59 +775,125 @@ class TargetManager:
             return FilteredFiles(candidates)
 
         kept, removed = partition(
-            candidates, lambda path: os.path.getsize(path) <= max_target_bytes
+            candidates,
+            lambda path: os.path.isfile(path)
+            and os.path.getsize(path) <= max_target_bytes,
         )
 
         return FilteredFiles(frozenset(kept), frozenset(removed))
 
     @lru_cache(maxsize=None)
-    def get_all_files(self) -> FrozenSet[Path]:
-        return frozenset(f for target in self.targets for f in target.files())
+    def get_all_files(self, ignore_baseline_handler: bool = False) -> FrozenSet[Path]:
+        return frozenset(
+            f
+            for root in self.scanning_roots
+            for f in root.files(ignore_baseline_handler)
+        )
 
     @lru_cache(maxsize=None)
-    def get_files_for_language(self, lang: Union[Language, Ecosystem]) -> FilteredFiles:
+    def get_paths_with_insufficient_permissions(
+        self, ignore_baseline_handler: bool = False
+    ) -> FrozenSet[Path]:
         """
-        Return all files that are decendants of any directory in TARGET that have
+        Return paths with insufficient permissions we already know about.
+        This is not always all of them depending on how these paths were
+        obtained.
+        """
+        return frozenset(
+            f
+            for root in self.scanning_roots
+            for f in root.paths_with_insufficient_permissions(ignore_baseline_handler)
+        )
+
+    @lru_cache(maxsize=None)
+    def get_files_for_language(
+        self,
+        lang: Union[None, Language, Literal["dependency_source_files"]],
+        product: out.Product,
+        ignore_baseline_handler: bool = False,
+    ) -> FilteredFiles:
+        """
+        Return all files that are descendants of any directory in TARGET that have
         an extension matching LANG or are a lockfile for LANG ecosystem that match any pattern in INCLUDES and do not
         match any pattern in EXCLUDES. Any file in TARGET bypasses excludes and includes.
-        If a file in TARGET has a known extension that is not for langugage LANG then
-        it is also filtered out
+        If a file in TARGET has a known extension that is not for language LANG then
+        it is also filtered out.
+
+        Lang can be:
+        - A true language, which causes this function to return source code files in that language
+        - `None`, which skips language filtering altogether
+        - `"dependency_source_files"`, which finds files that might contain dependency source information across all project types
 
         Note also filters out any directory and descendants of `.git`
-        """
-        all_files = self.get_all_files()
 
-        files = self.filter_by_language(lang, candidates=all_files)
-        self.ignore_log.by_language[lang].update(files.removed)
+        ignore_baseline_handler: if True, will ignore the baseline handler and scan all files. Used in the context of scanning unchanged lockfiles for their dependencies and doing reachability analysis.
+        """
+        all_files = self.get_all_files(ignore_baseline_handler)
+
+        if isinstance(lang, Language):
+            files = self.filter_by_language(lang, candidates=all_files)
+            self.ignore_log.by_language[lang].update(files.removed)
+        elif lang == "dependency_source_files":
+            kept = filter_dependency_source_files(candidates=all_files)
+            files = FilteredFiles(kept, all_files - kept)
+            self.ignore_log.by_language[lang].update(files.removed)
+        else:
+            files = FilteredFiles(frozenset(all_files), frozenset())
+
+        ####################################################################
+        # language-independent, rule-independent target filtering
+        # TODO: generic filtering should not be done here!
+        # This prevents us from getting the count of targets before filtering
+        # them further based on applicable rules. This number is reported
+        # correctly by osemgrep but incorrectly by pysemgrep.
+        ####################################################################
 
         files = self.filter_includes(self.includes, candidates=files.kept)
         self.ignore_log.cli_includes.update(files.removed)
 
-        files = self.filter_excludes(self.excludes, candidates=files.kept)
+        files = self.filter_excludes(
+            self.excludes.get(product, []), candidates=files.kept
+        )
         self.ignore_log.cli_excludes.update(files.removed)
 
         files = self.filter_excludes(PATHS_ALWAYS_SKIPPED, candidates=files.kept)
         self.ignore_log.always_skipped.update(files.removed)
 
+        paths_with_insufficient_permissions = (
+            self.get_paths_with_insufficient_permissions(ignore_baseline_handler)
+        )
+        # Depending on how the files were obtained, we need to check
+        # for file permissions here
+        files = self.filter_by_permission(files.kept)
+        self.ignore_log.insufficient_permissions.update(
+            set(files.removed | paths_with_insufficient_permissions)
+        )
+
         # Lockfiles are easy to parse, and regularly surpass 1MB for big repos
-        if not isinstance(lang, Ecosystem):
+        if lang != "dependency_source_files":
             files = self.filter_by_size(self.max_target_bytes, candidates=files.kept)
             self.ignore_log.size_limit.update(files.removed)
 
-        if self.file_ignore:
-            files = self.file_ignore.filter_paths(candidates=files.kept)
+        if product in self.ignore_profiles and self.respect_semgrepignore:
+            file_ignore = self.ignore_profiles[product]
+            files = file_ignore.filter_paths(candidates=files.kept)
+            # TODO: Fix ignore_log to log which profile filtered which files.
             self.ignore_log.semgrepignored.update(files.removed)
 
         kept_files = files.kept
 
         explicit_files = frozenset(
-            t.path for t in self.targets if not t.path.is_dir() and t.path.is_file()
+            t.path
+            for t in self.scanning_roots
+            if not t.path.is_dir() and t.path.is_file()
         )
         explicit_files_for_lang = self.filter_by_language(
-            lang, candidates=explicit_files
+            lang if isinstance(lang, Language) else None, candidates=explicit_files
         )
         kept_files |= explicit_files_for_lang.kept
-        if self.allow_unknown_extensions:
+        if self.allow_unknown_extensions and lang != "dependency_source_files":
+            # add unknown extensions back in for languages. Don't do so when searching
+            # for dependency source information
             explicit_files_of_unknown_lang = self.filter_known_extensions(
                 candidates=explicit_files
             )
@@ -712,47 +907,38 @@ class TargetManager:
         rule_includes: Sequence[str],
         rule_excludes: Sequence[str],
         rule_id: str,
+        rule_product: out.Product,
     ) -> FrozenSet[Path]:
         """
-        Returns list of files that should be analyzed for a LANG
+        Returns list of target files that should be analyzed for a LANG
 
-        Given this object's TARGET, self.INCLUDE, and self.EXCLUDE will return list
-        of all descendant files of directories in TARGET that end in extension
-        typical for LANG. If self.INCLUDES is non empty then all files will have an ancestor
+        Given this object's SCANNING_ROOT, self.INCLUDE, and self.EXCLUDE will return list
+        of all descendant files of directories in SCANNING_ROOT that end in extension
+        typical for LANG. If self.INCLUDES is nonempty then all files will have an ancestor
         that matches a pattern in self.INCLUDES. Will not include any file that has
         an ancestor that matches a pattern in self.EXCLUDES. Any explicitly named files
-        in TARGET will bypass this global INCLUDE/EXCLUDE filter. The local INCLUDE/EXCLUDE
+        in SCANNING_ROOT will bypass this global INCLUDE/EXCLUDE filter. The local INCLUDE/EXCLUDE
         filter is then applied.
         """
-        paths = self.get_files_for_language(lang)
+        paths = self.get_files_for_language(lang, rule_product)
 
-        paths = self.filter_includes(rule_includes, candidates=paths.kept)
-        self.ignore_log.rule_includes[rule_id].update(paths.removed)
+        if self.respect_rule_paths:
+            paths = self.filter_includes(rule_includes, candidates=paths.kept)
+            self.ignore_log.rule_includes[rule_id].update(paths.removed)
 
-        paths = self.filter_excludes(rule_excludes, candidates=paths.kept)
-        self.ignore_log.rule_excludes[rule_id].update(paths.removed)
+            paths = self.filter_excludes(rule_excludes, candidates=paths.kept)
+            self.ignore_log.rule_excludes[rule_id].update(paths.removed)
 
         return paths.kept
 
-    @lru_cache(maxsize=None)
-    def get_lockfile_dependencies(
-        self, ecosystem: Ecosystem
-    ) -> Dict[Path, List[FoundDependency]]:
-        lockfiles = self.get_files_for_language(ecosystem).kept
-        parsed: Dict[Path, List[FoundDependency]] = {}
-        for lockfile in lockfiles:
-            path, lockfile_pattern = lockfile.parent, lockfile.parts[-1]
-            manifest_pattern = LOCKFILE_TO_MANIFEST[lockfile_pattern]
-            manifest_path = path / manifest_pattern if manifest_pattern else None
-            deps = parse_lockfile_str(
-                lockfile.read_text(encoding="utf8"),
-                lockfile,
-                manifest_path.read_text(encoding="utf8")
-                if manifest_path and manifest_path.exists()
-                else None,
-            )
-            if lockfile not in self.lockfile_scan_info:
-                # We haven't seen this file during reachable finding generation
-                self.lockfile_scan_info[str(lockfile)] = len(deps)
-            parsed[lockfile] = deps
-        return parsed
+    def get_all_dependency_source_files(
+        self,
+        ignore_baseline_handler: bool = False,
+    ) -> FrozenSet[Path]:
+        """
+        Return all files that might be used as a source of dependency information
+        """
+        all_files = self.get_files_for_language(
+            "dependency_source_files", out.Product(out.SCA()), ignore_baseline_handler
+        )
+        return all_files.kept

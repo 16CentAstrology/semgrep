@@ -1,5 +1,6 @@
 import os
 import subprocess
+from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from typing import Any
 from typing import Optional
@@ -11,6 +12,7 @@ from attrs import define
 from attrs import field
 
 from semgrep import __VERSION__
+from semgrep import tracing
 
 
 @define
@@ -77,6 +79,37 @@ class UserAgent:
         return result
 
 
+def enhance_ssl_error_message(
+    err: requests.exceptions.SSLError,
+) -> requests.exceptions.SSLError:
+    """
+    If the provided SSLError wraps a SSL hostname mismatch exception, re-create the SSLError with a more descriptive error message.
+    """
+    inner_err: Optional[Exception] = None
+
+    if err.args:
+        inner_err = err.args[0]
+
+    if isinstance(inner_err, urllib3.connectionpool.MaxRetryError) and inner_err.reason:
+        inner_err = inner_err.reason
+
+    if isinstance(inner_err, requests.exceptions.SSLError) and inner_err.args:
+        inner_err = inner_err.args[0]
+
+    if (
+        isinstance(inner_err, urllib3.connectionpool.CertificateError)
+        and inner_err.args
+        and isinstance(inner_err.args[0], str)
+        and inner_err.args[0].startswith("hostname")
+        and "doesn't match" in inner_err.args[0]
+    ):
+        return requests.exceptions.SSLError(
+            f"SSL certificate error: {inner_err.args[0]}. This error typically occurs when your internet traffic is being routed through a proxy. If this is the case, try setting the REQUESTS_CA_BUNDLE environment variable to the location of your proxy's CA certificate."
+        )
+
+    return err
+
+
 class AppSession(requests.Session):
     """
     Send requests to Semgrep App with this session.
@@ -86,7 +119,8 @@ class AppSession(requests.Session):
     The following features are added over the base Session class:
     - A default retrying policy is added to each request
     - A User-Agent is automatically added to each request
-    - A default timeout of 30 seconds is added to each request
+    - Request IDs are automatically added to each request
+    - A default timeout of 70 seconds is added to each request
     - If a token is available, it is added to the request as an Authorization header
 
     Normal usage:
@@ -108,6 +142,10 @@ class AppSession(requests.Session):
         super().__init__(*args, **kwargs)
         self.user_agent = UserAgent()
         self.token: Optional[str] = None
+        if os.getenv("SEMGREP_COOKIES_PATH"):
+            cookies = MozillaCookieJar(os.environ["SEMGREP_COOKIES_PATH"])
+            cookies.load()
+            self.cookies = cookies  # type: ignore
 
         # retry after 4, 8, 16 seconds
         retry_adapter = requests.adapters.HTTPAdapter(
@@ -115,9 +153,10 @@ class AppSession(requests.Session):
                 total=3,
                 backoff_factor=4,
                 allowed_methods=["GET", "POST"],
-                status_forcelist=(413, 429, 500, 502, 503),
+                status_forcelist=(413, 429, 500, 502, 503, 504),
             ),
         )
+
         self.mount("https://", retry_adapter)
         self.mount("http://", retry_adapter)
 
@@ -131,19 +170,34 @@ class AppSession(requests.Session):
         metrics = get_state().metrics
         metrics.add_token(self.token)
 
+    @property
+    def is_authenticated(self) -> bool:
+        return self.token is not None
+
+    @tracing.trace()
     def request(self, *args: Any, **kwargs: Any) -> requests.Response:
-        kwargs.setdefault("timeout", 60)
+        kwargs.setdefault(
+            "timeout", 70
+        )  # most backend endpoints are 60s, ideally we have the backend time out before the client
         kwargs.setdefault("headers", {})
+
+        from semgrep.state import get_state  # avoid circular imports
+
+        state = get_state()
+
         kwargs["headers"].setdefault("User-Agent", str(self.user_agent))
+        kwargs["headers"].setdefault("X-Semgrep-Scan-ID", str(state.local_scan_id))
         if self.token:
             kwargs["headers"].setdefault("Authorization", f"Bearer {self.token}")
 
-        from semgrep.state import get_state
-
-        error_handler = get_state().error_handler
+        error_handler = state.error_handler
         method, url = args
         error_handler.push_request(method, url, **kwargs)
-        response = super().request(*args, **kwargs)
+        try:
+            response = super().request(*args, **kwargs)
+        except requests.exceptions.SSLError as err:
+            raise enhance_ssl_error_message(err)
+
         if response.ok:
             error_handler.pop_request()
         else:

@@ -4,23 +4,40 @@ import subprocess
 import urllib.parse
 from dataclasses import dataclass
 from dataclasses import field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import Dict
 from typing import Optional
 
+import requests
 from boltons.cacheutils import cachedproperty
 from glom import glom
 from glom import T
 from glom.core import TType
 
-from semgrep import __VERSION__
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semgrep.external.git_url_parser import Parser
+from semgrep.git import git_check_output
+from semgrep.git import is_git_repo_empty
 from semgrep.state import get_state
-from semgrep.util import git_check_output
 from semgrep.verbose_logging import getLogger
 
 logger = getLogger(__name__)
+
+
+def uri_opt(uri: Optional[str]) -> Optional[out.Uri]:
+    if uri is None:
+        return None
+    else:
+        return out.Uri(uri)
+
+
+def sha1_opt(x: Optional[str]) -> Optional[out.Sha1]:
+    if x is None:
+        return None
+    else:
+        return out.Sha1(x)
 
 
 def get_url_from_sstp_url(sstp_url: Optional[str]) -> Optional[str]:
@@ -39,7 +56,16 @@ def get_url_from_sstp_url(sstp_url: Optional[str]) -> Optional[str]:
         # let's just pick https
         protocol = "https"
 
-    return f"{protocol}://{result.resource}/{result.owner}/{result.name}"
+    # We need to parse the URL into a clickable format, a la these supported formats:
+    # https://stackoverflow.com/questions/31801271/what-are-the-supported-git-url-formats
+    # We only support a few, though, so we may get `None` if we run into a format we do
+    # not support.
+    # So if we know that this URL is going to be unclickable, we should return
+    # the original URL
+    if None in [protocol, result.resource, result.owner, result.name]:
+        return sstp_url
+
+    return f"{protocol}://{result.resource}/{result.owner}{result.azure_git_dir}/{result.name}"
 
 
 def get_repo_name_from_repo_url(repo_url: Optional[str]) -> Optional[str]:
@@ -57,6 +83,7 @@ class GitMeta:
     """Gather metadata only from local filesystem."""
 
     cli_baseline_ref: Optional[str] = None
+    subdir: Optional[Path] = None
     environment: str = field(default="git", init=False)
 
     @property
@@ -85,11 +112,40 @@ class GitMeta:
             )
 
         repo_root_str = rev_parse.stdout.strip()
-        return str(os.path.basename(repo_root_str))
+        return f"local_scan/{str(os.path.basename(repo_root_str))}"
+
+    @property
+    def repo_display_name(self) -> str:
+        # If a subdirectory is passed to semgrep ci, always create a different project
+        # This prevents the user from being able to accidentally close their findings
+        # by scanning a subdirectory
+        display_name = self.repo_name
+        if self.subdir:
+            display_name += f"/{self.subdir}"
+
+        # Using the 'or' for the typechecker
+        return os.getenv("SEMGREP_REPO_DISPLAY_NAME") or display_name
 
     @property
     def repo_url(self) -> Optional[str]:
-        return get_url_from_sstp_url(os.getenv("SEMGREP_REPO_URL"))
+        env = get_state().env
+        repo_url = os.getenv("SEMGREP_REPO_URL")
+        if not repo_url:
+            # if the repo URL was not explicitly provided, try getting it from git
+            # nosem: use-git-check-output-helper
+            git_parse = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                capture_output=True,
+                encoding="utf-8",
+                timeout=env.git_command_timeout,
+            )
+            if git_parse.returncode != 0:
+                logger.warn(
+                    f"Unable to infer repo_url. Set SEMGREP_REPO_URL environment variable or run in a valid git project with remote origin defined"
+                )
+            repo_url = git_parse.stdout.strip()
+
+        return get_url_from_sstp_url(repo_url)
 
     @property
     def commit_sha(self) -> Optional[str]:
@@ -137,33 +193,66 @@ class GitMeta:
         """
         return git_check_output(["git", "show", "-s", "--format=%ct"])
 
-    def to_dict(self) -> Dict[str, Any]:
-        commit_title = git_check_output(["git", "show", "-s", "--format=%B"])
-        commit_author_email = git_check_output(["git", "show", "-s", "--format=%ae"])
-        commit_author_name = git_check_output(["git", "show", "-s", "--format=%an"])
+    @property
+    def commit_timestamp(self) -> out.Datetime:
+        """
+        Returns the commit timestamp as an iso-formatted datetime string.
+        """
+        return out.Datetime(
+            datetime.fromtimestamp(int(self.commit_datetime)).isoformat()
+        )
 
-        return {
-            "semgrep_version": __VERSION__,
+    @property
+    def is_full_scan(self) -> bool:
+        return self.merge_base_ref is None
+
+    @property
+    def is_empty(self) -> bool:
+        return is_git_repo_empty()
+
+    def to_project_metadata(self) -> out.ProjectMetadata:
+        # Many of these optional fields for the semgrep-app backend depend on git
+        # commands that assume the repo not to be empty.
+        commit_title = None
+        commit_author_email = None
+        commit_author_name = None
+        branch = None
+        commit = None
+        commit_timestamp = None
+
+        if not self.is_empty:
+            commit_title = git_check_output(["git", "show", "-s", "--format=%B"])
+            commit_author_email = git_check_output(
+                ["git", "show", "-s", "--format=%ae"]
+            )
+            commit_author_name = git_check_output(["git", "show", "-s", "--format=%an"])
+            branch = self.branch
+            commit = sha1_opt(self.commit_sha)
+            commit_timestamp = self.commit_timestamp
+
+        return out.ProjectMetadata(
             # REQUIRED for semgrep-app backend
-            "repository": self.repo_name,
-            #  OPTIONAL for semgrep-app backend
-            "repo_url": self.repo_url,
-            "branch": self.branch,
-            "ci_job_url": self.ci_job_url,
-            "commit": self.commit_sha,
-            "commit_author_email": commit_author_email,
-            "commit_author_name": commit_author_name,
-            "commit_author_username": None,
-            "commit_author_image_url": None,
-            "commit_title": commit_title,
-            "on": self.event_name,
-            "pull_request_author_username": None,
-            "pull_request_author_image_url": None,
-            "pull_request_id": self.pr_id,
-            "pull_request_title": self.pr_title,
-            "scan_environment": self.environment,
-            "is_full_scan": self.merge_base_ref is None,
-        }
+            repository=self.repo_name,
+            repo_display_name=self.repo_display_name,
+            # OPTIONAL for semgrep-app backend
+            repo_url=uri_opt(self.repo_url),
+            branch=branch,
+            ci_job_url=uri_opt(self.ci_job_url),
+            commit=commit,
+            commit_author_email=commit_author_email,
+            commit_author_name=commit_author_name,
+            commit_author_username=None,
+            commit_author_image_url=None,
+            commit_title=commit_title,
+            commit_timestamp=commit_timestamp,
+            on=self.event_name,
+            pull_request_author_username=None,
+            pull_request_author_image_url=None,
+            pull_request_id=self.pr_id,
+            pull_request_title=self.pr_title,
+            scan_environment=self.environment,
+            is_full_scan=self.is_full_scan,
+        )
 
 
 @dataclass
@@ -185,25 +274,48 @@ class GithubMeta(GitMeta):
         return {}
 
     @property
+    def gh_token(self) -> Optional[str]:
+        return os.getenv("GH_TOKEN")
+
+    @property
     def is_pull_request_event(self) -> bool:
         """Return if running on a PR, even for variant types such as `pull_request_target`."""
         return self.event_name in {"pull_request", "pull_request_target"}
 
     @property
     def repo_name(self) -> str:
-        repo_name = os.getenv("GITHUB_REPOSITORY")
+        repo_name = os.getenv("SEMGREP_REPO_NAME", os.getenv("GITHUB_REPOSITORY"))
+
+        # NOTE: no-super-first
+        # we don't call super().repo_url _first_ because that makes a call to the git remote
+        # if the env var is not set
+        # we want to prioritize the explicit env var, but the case where it isn't set,
+        # we should just do what we'd normally do
+        # in this particular case, we actually just don't call it at all
         if repo_name:
             return repo_name
         else:
             raise Exception("Could not get repo_name when running in GithubAction")
 
     @property
+    def repo_display_name(self) -> str:
+        return super().repo_display_name
+
+    @property
     def repo_url(self) -> Optional[str]:
         server_url = os.getenv("GITHUB_SERVER_URL", "https://github.com")
+        semgrep_repo_url = os.getenv("SEMGREP_REPO_URL")
 
-        if self.repo_name:
+        # see NOTE: no-super-first
+        if semgrep_repo_url:
+            return semgrep_repo_url
+        elif self.repo_name:
             return f"{server_url}/{self.repo_name}"
         return None
+
+    @property
+    def api_url(self) -> Optional[str]:
+        return os.getenv("GITHUB_API_URL")
 
     @property
     def commit_sha(self) -> Optional[str]:
@@ -228,6 +340,26 @@ class GithubMeta(GitMeta):
                 "--force",
                 "--update-head-ok",
                 f"{branch_name}:{branch_name}",
+            ]
+        )
+
+    def _shallow_fetch_commit(self, commit_hash: str) -> None:
+        """
+        Split out shallow fetch so we can mock it away in tests
+
+        Different from _shallow_fetch_branch because it does not assign a local
+        name to the commit. It just does the fetch.
+        """
+        logger.debug(f"Trying to shallow fetch commit {commit_hash} from origin")
+        git_check_output(
+            [
+                "git",
+                "fetch",
+                "origin",
+                "--depth=1",
+                "--force",
+                "--update-head-ok",
+                commit_hash,
             ]
         )
 
@@ -348,6 +480,63 @@ class GithubMeta(GitMeta):
                 ]
             )
 
+        # By default, the GitHub Actions checkout action gives you a shallow
+        # clone of the repository. In order to get the merge base, we need to
+        # fetch the history of the head branch and the base branch, all the way
+        # back to the point where the head branch diverged. In a large
+        # repository, this can be a lot of commits, and this fetching can
+        # dramatically impact performance.
+        #
+        # To avoid this, on the first attempt to find the merge base, we try to
+        # use the GitHub REST API instead of fetching enough history to compute
+        # it locally. We only do this if the `GH_TOKEN` environment variable is
+        # provided. GitHub Actions provides that token to workflows, but the
+        # workflow needs to explicitly make it available to Semgrep via an
+        # environment variable like this:
+        #
+        # env:
+        #   GH_TOKEN: ${{ github.token }}
+        #
+        # This will allow Semgrep to make this API request even for private
+        # repositories.
+        if (
+            attempt_count == 0
+            and self.gh_token is not None
+            and self.api_url is not None
+            and self.repo_name is not None
+        ):
+            logger.debug("Trying to get merge base using GitHub API")
+            try:
+                headers = {"Authorization": f"Bearer {self.gh_token}"}
+                req = requests.get(
+                    f"{self.api_url}/repos/{self.repo_name}/compare/{self.base_branch_hash}...{self.head_branch_hash}",
+                    headers=headers,
+                    timeout=3,
+                )
+                if req.status_code == 200:
+                    compare_json = json.loads(req.text)
+                    base = glom(
+                        compare_json, T["merge_base_commit"]["sha"], default=None
+                    )
+                    if type(base) == str:
+                        logger.debug(f"Got merge base using GitHub API: {base}")
+                        # Normally, we fetch commits until we can compute the
+                        # merge base locally. That guarantees that the merge
+                        # base itself has been fetched. However, when we just
+                        # query the GH API, we don't necessarily have anything
+                        # locally. Later steps will check out the merge base, so
+                        # we need to make sure it is available locally or those
+                        # steps will error.
+                        self._shallow_fetch_commit(base)
+                        return base
+            except Exception as e:
+                # We're relying on an external service here. If something goes
+                # wrong, just log the exception and continue with the ordinary
+                # method of computing the merge base.
+                logger.debug(
+                    f"Encountered error while getting merge base using GitHub API: {repr(e)}"
+                )
+
         try:  # check if both branches connect to the yet-unknown branch-off point now
             # nosem: use-git-check-output-helper
             process = subprocess.run(
@@ -388,6 +577,10 @@ class GithubMeta(GitMeta):
 
     @property
     def ci_job_url(self) -> Optional[str]:
+        semgrep_job_url = super().ci_job_url
+        if semgrep_job_url:
+            return semgrep_job_url
+
         value = os.getenv("GITHUB_RUN_ID")
         if self.repo_url and value:
             return f"{self.repo_url}/actions/runs/{value}"
@@ -399,11 +592,19 @@ class GithubMeta(GitMeta):
 
     @property
     def pr_id(self) -> Optional[str]:
+        semgrep_pr_id = super().pr_id
+        if semgrep_pr_id:
+            return semgrep_pr_id
+
         pr_id = self.glom_event(T["pull_request"]["number"])
         return str(pr_id) if pr_id else None
 
     @property
     def pr_title(self) -> Optional[str]:
+        semgrep_pr_title = super().pr_title
+        if semgrep_pr_title:
+            return semgrep_pr_title
+
         pr_title = self.glom_event(T["pull_request"]["title"])
         return str(pr_title) if pr_title else None
 
@@ -430,20 +631,30 @@ class GithubMeta(GitMeta):
         """
         if self.event_name == "pull_request_target":
             return os.getenv("GITHUB_HEAD_REF")
-        return os.getenv("GITHUB_REF")
+        github_ref = os.getenv("SEMGREP_BRANCH", os.getenv("GITHUB_REF"))
+        if github_ref:
+            return github_ref
+        return super().branch
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            **super().to_dict(),
-            "commit_author_username": self.glom_event(T["sender"]["login"]),
-            "commit_author_image_url": self.glom_event(T["sender"]["avatar_url"]),
-            "pull_request_author_username": self.glom_event(
-                T["pull_request"]["user"]["login"]
-            ),
-            "pull_request_author_image_url": self.glom_event(
-                T["pull_request"]["user"]["avatar_url"]
-            ),
-        }
+    def to_project_metadata(self) -> out.ProjectMetadata:
+        res = super().to_project_metadata()
+        res.commit_author_username = self.glom_event(T["sender"]["login"])
+        res.commit_author_image_url = uri_opt(
+            self.glom_event(T["sender"]["avatar_url"])
+        )
+        res.pull_request_author_username = self.glom_event(
+            T["pull_request"]["user"]["login"]
+        )
+        res.pull_request_author_image_url = uri_opt(
+            self.glom_event(T["pull_request"]["user"]["avatar_url"])
+        )
+        repo_id = os.getenv("GITHUB_REPOSITORY_ID")
+        org_id = os.getenv("GITHUB_REPOSITORY_OWNER_ID")
+        if repo_id:
+            res.repo_id = repo_id
+        if org_id:
+            res.org_id = org_id
+        return res
 
 
 @dataclass
@@ -478,15 +689,34 @@ class GitlabMeta(GitMeta):
 
     @property
     def repo_name(self) -> str:
-        return os.getenv("CI_PROJECT_PATH", "[unknown]")
+        project_path = os.getenv("SEMGREP_REPO_NAME", os.getenv("CI_PROJECT_PATH"))
+
+        # see NOTE: no-super-first
+        if project_path:
+            return project_path
+        return super().repo_name
+
+    @property
+    def repo_display_name(self) -> str:
+        return super().repo_display_name
 
     @property
     def repo_url(self) -> Optional[str]:
-        return os.getenv("CI_PROJECT_URL")
+        project_url = os.getenv("SEMGREP_REPO_URL", os.getenv("CI_PROJECT_URL"))
+
+        # see NOTE: no-super-first
+        if project_url:
+            return project_url
+        return super().repo_url
 
     @property
     def commit_sha(self) -> Optional[str]:
-        return os.getenv("CI_COMMIT_SHA")
+        commit_sha = os.getenv("SEMGREP_COMMIT", os.getenv("CI_COMMIT_SHA"))
+
+        # see NOTE: no-super-first
+        if commit_sha:
+            return commit_sha
+        return super().commit_sha
 
     @property
     def commit_ref(self) -> Optional[str]:
@@ -505,7 +735,12 @@ class GitlabMeta(GitMeta):
 
     @property
     def ci_job_url(self) -> Optional[str]:
-        return os.getenv("CI_JOB_URL")
+        job_url = os.getenv("SEMGREP_JOB_URL", os.getenv("CI_JOB_URL"))
+
+        # see NOTE: no-super-first
+        if job_url:
+            return job_url
+        return super().ci_job_url
 
     @property
     def event_name(self) -> str:
@@ -516,7 +751,14 @@ class GitlabMeta(GitMeta):
 
     @property
     def pr_id(self) -> Optional[str]:
-        return os.getenv("CI_MERGE_REQUEST_IID")
+        pr_id = os.getenv("CI_MERGE_REQUEST_IID")
+        semgrep_pr_id = super().pr_id
+
+        if semgrep_pr_id:
+            return semgrep_pr_id
+        if pr_id:
+            return pr_id
+        return None
 
     @property
     def start_sha(self) -> Optional[str]:
@@ -524,15 +766,21 @@ class GitlabMeta(GitMeta):
 
     @property
     def pr_title(self) -> Optional[str]:
-        return os.getenv("CI_MERGE_REQUEST_TITLE")
+        pr_title = os.getenv("CI_MERGE_REQUEST_TITLE")
+        semgrep_pr_title = super().pr_title
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            **super().to_dict(),
-            "branch": self.commit_ref,
-            "base_sha": self.merge_base_ref,
-            "start_sha": self.start_sha,
-        }
+        if semgrep_pr_title:
+            return semgrep_pr_title
+        if pr_title:
+            return pr_title
+        return None
+
+    def to_project_metadata(self) -> out.ProjectMetadata:
+        res = super().to_project_metadata()
+        res.branch = self.commit_ref
+        res.base_sha = sha1_opt(self.merge_base_ref)
+        res.start_sha = sha1_opt(self.start_sha)
+        return res
 
 
 @dataclass
@@ -554,6 +802,10 @@ class CircleCIMeta(GitMeta):
             name = get_repo_name_from_repo_url(os.getenv("CIRCLE_REPOSITORY_URL"))
             return name if name else super().repo_name
         return f"{project_name}/{repo_name}"
+
+    @property
+    def repo_display_name(self) -> str:
+        return super().repo_display_name
 
     @property
     def repo_url(self) -> Optional[str]:
@@ -618,6 +870,10 @@ class JenkinsMeta(GitMeta):
         return name if name else super().repo_name
 
     @property
+    def repo_display_name(self) -> str:
+        return super().repo_display_name
+
+    @property
     def repo_url(self) -> Optional[str]:
         repo_url = os.getenv("SEMGREP_REPO_URL")
         if repo_url:
@@ -673,12 +929,18 @@ class BitbucketMeta(GitMeta):
         return name if name else super().repo_name
 
     @property
+    def repo_display_name(self) -> str:
+        return super().repo_display_name
+
+    @property
     def repo_url(self) -> Optional[str]:
         repo_url = os.getenv("SEMGREP_REPO_URL")
         if repo_url:
             return repo_url
 
-        url = get_url_from_sstp_url(os.getenv("BITBUCKET_GIT_HTTP_ORIGIN"))
+        # Bitbucket Cloud URLs should be in the format: http://bitbucket.org/<workspace>/<repo>
+        # Bitbucker Server URLs should be in the format: https://bitbucket<company>.com/projects/<PROJECT>/repos/<REPO_NAME>
+        url = os.getenv("BITBUCKET_GIT_HTTP_ORIGIN")
         return url if url else super().repo_url
 
     @property
@@ -732,6 +994,10 @@ class AzurePipelinesMeta(GitMeta):
 
         name = get_repo_name_from_repo_url(self.repo_url)
         return name if name else super().repo_name
+
+    @property
+    def repo_display_name(self) -> str:
+        return super().repo_display_name
 
     @property
     def repo_url(self) -> Optional[str]:
@@ -816,6 +1082,10 @@ class BuildkiteMeta(GitMeta):
         return name if name else super().repo_name
 
     @property
+    def repo_display_name(self) -> str:
+        return super().repo_display_name
+
+    @property
     def repo_url(self) -> Optional[str]:
         repo_url = os.getenv("SEMGREP_REPO_URL")
         if repo_url:
@@ -860,13 +1130,12 @@ class BuildkiteMeta(GitMeta):
         pr_id = os.getenv("BUILDKITE_PULL_REQUEST")
         return None if pr_id == "false" else pr_id
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            **super().to_dict(),
-            "commit_author_email": os.getenv("BUILDKITE_BUILD_AUTHOR_EMAIL"),
-            "commit_author_name": os.getenv("BUILDKITE_BUILD_AUTHOR"),
-            "commit_title": os.getenv("BUILDKITE_MESSAGE"),
-        }
+    def to_project_metadata(self) -> out.ProjectMetadata:
+        res = super().to_project_metadata()
+        res.commit_author_email = os.getenv("BUILDKITE_BUILD_AUTHOR_EMAIL")
+        res.commit_author_name = os.getenv("BUILDKITE_BUILD_AUTHOR")
+        res.commit_title = os.getenv("BUILDKITE_MESSAGE")
+        return res
 
 
 @dataclass
@@ -883,6 +1152,10 @@ class TravisMeta(GitMeta):
 
         repo_name = os.getenv("TRAVIS_REPO_SLUG")
         return repo_name if repo_name else super().repo_name
+
+    @property
+    def repo_display_name(self) -> str:
+        return super().repo_display_name
 
     @property
     def repo_url(self) -> Optional[str]:
@@ -924,11 +1197,26 @@ class TravisMeta(GitMeta):
 
         return os.getenv("TRAVIS_PULL_REQUEST")
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {**super().to_dict(), "commit_title": os.getenv("TRAVIS_COMMIT_MESSAGE")}
+    def to_project_metadata(self) -> out.ProjectMetadata:
+        res = super().to_project_metadata()
+        res.commit_title = os.getenv("TRAVIS_COMMIT_MESSAGE")
+        return res
 
 
-def generate_meta_from_environment(baseline_ref: Optional[str]) -> GitMeta:
+@dataclass
+class SemgrepManagedScanMeta(GitMeta):
+    """Gather metadata from Semgrep Managed Scanning."""
+
+    environment: str = field(default="semgrep-managed-scan", init=False)
+
+    @property
+    def event_name(self) -> str:
+        return os.getenv("SEMGREP_MANAGED_SCAN_EVENT_NAME", super().event_name)
+
+
+def generate_meta_from_environment(
+    baseline_ref: Optional[str], subdir: Optional[Path]
+) -> GitMeta:
     # https://help.github.com/en/actions/configuring-and-managing-workflows/using-environment-variables
     if os.getenv("GITHUB_ACTIONS") == "true":
         return GithubMeta(baseline_ref)
@@ -962,5 +1250,8 @@ def generate_meta_from_environment(baseline_ref: Optional[str]) -> GitMeta:
     elif os.getenv("TRAVIS") == "true":
         return TravisMeta(baseline_ref)
 
+    elif os.getenv("SEMGREP_MANAGED_SCAN") == "true":
+        return SemgrepManagedScanMeta(baseline_ref)
+
     else:
-        return GitMeta(baseline_ref)
+        return GitMeta(baseline_ref, subdir)

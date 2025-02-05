@@ -1,14 +1,5 @@
-"""
-For each directory containing YAML rules, run those rules on the file in the same directory with the same name but different extension.
-E.g. eqeq.yaml runs on eqeq.py.
-Validate that the output is annotated in the source file with by looking for a comment like:
-
- ```
- # ruleid:eqeq-is-bad
- ```
- On the preceeding line.
-
- """
+# This file is DEPRECATED! Please modify instead osemgrep test in
+# src/osemgrep/cli_test/Test_subcommand.ml
 import collections
 import difflib
 import functools
@@ -18,6 +9,7 @@ import os
 import shutil
 import sys
 import tempfile
+import traceback
 import uuid
 from itertools import product
 from pathlib import Path
@@ -33,8 +25,9 @@ from typing import Tuple
 from boltons.iterutils import partition
 from ruamel.yaml import YAML
 
+import semgrep.run_scan
 from semgrep.constants import BREAK_LINE
-from semgrep.semgrep_main import invoke_semgrep
+from semgrep.engine import EngineType
 from semgrep.util import final_suffix_matches
 from semgrep.util import is_config_fixtest_suffix
 from semgrep.util import is_config_suffix
@@ -60,15 +53,26 @@ def _remove_ending_comments(rule: str) -> str:
     return rule
 
 
+# Partial support for pro/deep annotations by just skipping them.
+# Use osemgrep test --pro if you actually want to process those annotations.
 def normalize_rule_ids(line: str) -> Set[str]:
     """
     given a line like `     # ruleid:foobar`
     or `      // ruleid:foobar`
+    or `      // ruleid:deepok:foobar`
     return `foobar`
     """
-    _, rules_text = line.strip().split(":")
+    _, rules_text = line.strip().split(":", 1)
     rules_text = rules_text.strip()
-    rules = rules_text.split(",")
+    # strip out "deepok" and "deepruleid" annotations if they are there to get rule name
+    if (
+        rules_text.startswith("deepok")
+        or rules_text.startswith("prook")
+        or rules_text.startswith("deepruleid")
+        or rules_text.startswith("proruleid")
+    ):
+        _, rules_text = rules_text.split(":")
+    rules = rules_text.strip().split(",")
     # remove comment ends for non-newline comment syntaxes
     rules_clean = map(lambda rule: _remove_ending_comments(rule), rules)
     return set(filter(None, [rule.strip() for rule in rules_clean]))
@@ -210,7 +214,9 @@ def get_expected_and_reported_lines(
                         effective_line_num,
                         test_file_resolved,
                     )
-            except ValueError:  # comment looked like a test annotation but couldn't parse
+            except (
+                ValueError
+            ):  # comment looked like a test annotation but couldn't parse
                 logger.warning(
                     f"Could not parse {line} as a test annotation in file {test_file_resolved}. Skipping this line"
                 )
@@ -288,15 +294,17 @@ def _generate_fixcheck_output_line(
 
 
 def invoke_semgrep_multi(
-    config: Path, targets: List[Path], **kwargs: Any
+    config: Path, scanning_roots: List[Path], **kwargs: Any
 ) -> Tuple[Path, Optional[str], Any]:
     try:
-        output = invoke_semgrep(config, targets, **kwargs)
-    except Exception as error:
+        output = semgrep.run_scan.run_scan_and_return_json(
+            config=config, scanning_roots=scanning_roots, **kwargs
+        )
+    except Exception:
         # We must get the string of the error because the multiprocessing library
         # will fail the marshal the error and hang
         # See: https://bugs.python.org/issue39751
-        return (config, str(error), {})
+        return (config, traceback.format_exc(), {})
     else:
         return (config, None, output)
 
@@ -309,16 +317,21 @@ def create_temporary_copy(path: Path) -> str:
     return temp_path
 
 
-def relatively_eq(parent1: Path, child1: Path, parent2: Path, child2: Path) -> bool:
-    def remove_all_suffixes(p: Path) -> Path:
-        result = p.with_suffix("")
-        while result != result.with_suffix(""):
-            result = result.with_suffix("")
-        return result
+def relatively_eq(
+    parent_target: Path, target: Path, parent_config: Path, config: Path
+) -> bool:
+    def remove_all_suffixes(p: str) -> str:
+        return p.split(".", 1)[0]
 
-    rel1 = remove_all_suffixes(child1.relative_to(parent1))
-    rel2 = remove_all_suffixes(child2.relative_to(parent2))
-    return rel1 == rel2
+    rel1 = target.relative_to(parent_target).parts
+    rel2 = config.relative_to(parent_config).parts
+    s = len(rel2)
+    if len(rel1) < s:
+        return False
+    s -= 1
+    return rel1[:s] == rel2[:s] and remove_all_suffixes(rel1[s]) == remove_all_suffixes(
+        rel2[s]
+    )
 
 
 def get_config_filenames(original_config: Path) -> List[Path]:
@@ -371,7 +384,6 @@ def get_config_test_filenames(
 def get_config_fixtest_filenames(
     original_target: Path, targets: Dict[Path, List[Path]]
 ) -> Dict[Path, List[Tuple[Path, Path]]]:
-
     original_target_is_file_not_directory = original_target.is_file()
 
     if original_target_is_file_not_directory:
@@ -407,9 +419,11 @@ def get_config_fixtest_filenames(
 def config_contains_fix_key(config: Path) -> bool:
     with open(config) as file:
         yaml = YAML(typ="safe")  # default, if not specfied, is 'rt' (round-trip)
-        rule = yaml.load(file)
-        if "rules" in rule:
-            return "fix" in rule["rules"][0]
+        rules = yaml.load(file)
+        if rules.get("rules"):
+            return any(
+                ("fix" in rule or "fix-regex" in rule) for rule in rules["rules"]
+            )
         else:
             return False
 
@@ -427,7 +441,6 @@ def checkid_passed(matches_for_checkid: Dict[str, Any]) -> bool:
 def fixed_file_comparison(
     fixed_testfile: Path, expected_fixed_testfile: str
 ) -> List[str]:
-
     diff = []
     with open(fixed_testfile) as file1, open(expected_fixed_testfile) as file2:
         lines1 = file1.readlines()
@@ -445,7 +458,7 @@ def generate_test_results(
     config: Path,
     strict: bool,
     json_output: bool,
-    deep: bool,
+    engine_type: EngineType,
     optimizations: str = "none",
 ) -> None:
     config_filenames = get_config_filenames(config)
@@ -464,11 +477,20 @@ def generate_test_results(
 
     config_missing_tests_output = [str(c[0]) for c in config_without_tests]
 
+    # in a test context, we don't want to honor the paths: (include/exclude)
+    # directive since the test target file, which must have the same
+    # basename than the rule, may not match the paths: of the rule
+    respect_rule_paths = False
+    no_git_ignore = True
+    no_rewrite_rule_ids = True
+    # COUPLING: the arguments are the same as the second semgrep-core
+    # invocation later in this file (except for one)!
     invoke_semgrep_fn = functools.partial(
         invoke_semgrep_multi,
-        deep=deep,
-        no_git_ignore=True,
-        no_rewrite_rule_ids=True,
+        engine_type=engine_type,
+        no_git_ignore=no_git_ignore,
+        respect_rule_paths=respect_rule_paths,
+        no_rewrite_rule_ids=no_rewrite_rule_ids,
         strict=strict,
         optimizations=optimizations,
     )
@@ -522,24 +544,27 @@ def generate_test_results(
         str(c) for c, _fixtest in config_without_fixtests if config_contains_fix_key(c)
     ]
 
+    # TODO: dead code due to configs_with_fixtests being unused and commented out below!
     # this saves execution time: fix will not be correct, if regular test is not correct
-    passed_test_filenames = [
-        filename
-        for _config_filename, matches, soft_errors in tested
-        for _check_id, filename_and_matches in matches.items()
-        for filename, expected_and_reported_lines in filename_and_matches.items()
-        if expected_and_reported_lines["expected_lines"]
-        == expected_and_reported_lines["reported_lines"]
-        and not soft_errors
-    ]
-    configs_with_fixtests = {
-        config: [
-            (target, fixtest)
-            for target, fixtest in testfiles
-            if os.path.abspath(target) in passed_test_filenames
-        ]
-        for config, testfiles in config_with_fixtests
-    }
+    # passed_test_filenames = [
+    #    filename
+    #    for _config_filename, matches, soft_errors in tested
+    #    for _check_id, filename_and_matches in matches.items()
+    #    for filename, expected_and_reported_lines in filename_and_matches.items()
+    #    if expected_and_reported_lines["expected_lines"]
+    #    == expected_and_reported_lines["reported_lines"]
+    #    and not soft_errors
+    # ]
+
+    # TODO: unused misspelled variable 'configs_with_fixtests'! Enable this code?
+    # configs_with_fixtests = {
+    #    config: [
+    #        (target, fixtest)
+    #        for target, fixtest in testfiles
+    #        if os.path.abspath(target) in passed_test_filenames
+    #    ]
+    #    for config, testfiles in config_with_fixtests
+    # }
 
     temp_copies: Dict[Path, str] = {
         target: create_temporary_copy(target)
@@ -553,14 +578,16 @@ def generate_test_results(
     ]
 
     # This is the invocation of semgrep for testing autofix.
-    #
-    # TODO: should 'deep' be set to 'deep=deep' or always 'deep=False'?
+    # COUPLING: except for autofix, the arguments are the same as above
     invoke_semgrep_with_autofix_fn = functools.partial(
         invoke_semgrep_multi,
-        no_git_ignore=True,
-        no_rewrite_rule_ids=True,
+        engine_type=engine_type,
+        no_git_ignore=no_git_ignore,
+        respect_rule_paths=respect_rule_paths,
+        no_rewrite_rule_ids=no_rewrite_rule_ids,
         strict=strict,
         optimizations=optimizations,
+        # only option that differs from the earlier call to semgrep-core:
         autofix=True,
     )
 
@@ -584,8 +611,8 @@ def generate_test_results(
         os.remove(tempcopy)
 
     output = {
-        "config_missing_tests": config_missing_tests_output,
-        "config_missing_fixtests": configs_missing_fixtests,
+        "config_missing_tests": sorted(config_missing_tests_output),
+        "config_missing_fixtests": sorted(configs_missing_fixtests),
         "config_with_errors": config_with_errors_output,
         "results": results_output,
         "fixtest_results": fixtest_results_output,
@@ -609,6 +636,7 @@ def generate_test_results(
         print(json.dumps(output, indent=4, separators=(",", ": ")))
         sys.exit(exit_code)
 
+    # else text ouput
     num_tests = 0
     num_tests_passed = 0
     check_output_lines: str = ""
@@ -641,7 +669,7 @@ def generate_test_results(
             "No unit tests found. See https://semgrep.dev/docs/writing-rules/testing-rules"
         )
     elif num_tests == num_tests_passed:
-        print(f"{num_tests_passed}/{num_tests}: ✓ All tests passed ")
+        print(f"{num_tests_passed}/{num_tests}: ✓ All tests passed")
     else:
         print(
             f"{num_tests_passed}/{num_tests}: {num_tests - num_tests_passed} unit tests did not pass:"
@@ -652,7 +680,7 @@ def generate_test_results(
     if num_fixtests == 0:
         print("No tests for fixes found.")
     elif num_fixtests == num_fixtests_passed:
-        print(f"{num_fixtests_passed}/{num_fixtests}: ✓ All fix tests passed ")
+        print(f"{num_fixtests_passed}/{num_fixtests}: ✓ All fix tests passed")
     else:
         print(
             f"{num_fixtests_passed}/{num_fixtests}: {num_fixtests - num_fixtests_passed} fix tests did not pass: "
@@ -675,33 +703,32 @@ def generate_test_results(
 
 def test_main(
     *,
-    target: Sequence[str],
+    scanning_roots: Sequence[str],
     config: Optional[Sequence[str]],
     test_ignore_todo: bool,
     strict: bool,
     json: bool,
     optimizations: str,
-    deep: bool,
+    engine_type: EngineType,
 ) -> None:
-
-    if len(target) != 1:
+    if len(scanning_roots) != 1:
         raise Exception("only one target directory allowed for tests")
-    target_path = Path(target[0])
+    scanning_root_path = Path(scanning_roots[0])
 
     if config:
         if len(config) != 1:
             raise Exception("only one config directory allowed for tests")
         config_path = Path(config[0])
     else:
-        if target_path.is_file():
+        if scanning_root_path.is_file():
             raise Exception("--config is required when running a test on single file")
-        config_path = target_path
+        config_path = scanning_root_path
 
     generate_test_results(
-        target=target_path,
+        target=scanning_root_path,
         config=config_path,
         strict=strict,
         json_output=json,
-        deep=deep,
+        engine_type=engine_type,
         optimizations=optimizations,
     )

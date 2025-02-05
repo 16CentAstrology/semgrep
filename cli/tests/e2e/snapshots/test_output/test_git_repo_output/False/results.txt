@@ -1,4 +1,0 @@
-Nothing to scan.
-
-
-Ran 1 rule on 0 files: 0 findings.

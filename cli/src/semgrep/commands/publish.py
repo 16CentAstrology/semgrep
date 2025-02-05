@@ -13,7 +13,7 @@ from semgrep.app import auth
 from semgrep.commands.wrapper import handle_command_errors
 from semgrep.config_resolver import get_config
 from semgrep.error import FATAL_EXIT_CODE
-from semgrep.project import get_project_url
+from semgrep.git import get_project_url
 from semgrep.state import get_state
 from semgrep.test import get_config_filenames
 from semgrep.test import get_config_test_filenames
@@ -189,7 +189,7 @@ def _upload_rule(
         "registry_check_id": registry_id,
     }
     response = state.app_session.post(
-        f"{state.env.semgrep_url}/api/registry/rule", json=request_json
+        f"{state.env.semgrep_url}/api/registry/rules", json=request_json
     )
 
     if not response.ok:

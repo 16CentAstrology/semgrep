@@ -3,6 +3,7 @@
 # Run semgrep on a series of pairs (rules, repo) with different options,
 # and report the time it takes. Optionally upload the results to the semgrep
 # dashboard.
+# This script assumes the presence of 'semgrep' in the PATH.
 #
 import argparse
 import copy
@@ -51,9 +52,9 @@ handler.setFormatter(
 )
 logger.addHandler(handler)
 
-FINDINGS_SNAPSHOT_PATH = "snapshots/benchmark_findings.json"
-PERF_PATH = "semgrep/perf"
-PERF_RULE_PATH = "semgrep.perf"
+PERF_PATH = "OSS/perf"
+PERF_RULE_PATH = "OSS.perf"
+
 
 # This class allows us to put semgrep results in a set and compute set
 # differences while saving the original JSON dictionary
@@ -62,31 +63,30 @@ class SemgrepResult:
         self.res = dict
         dict2 = copy.deepcopy(dict)
 
-        # We use self.str to compare dicts, so change this
+        # We use self.str to compare dicts, so change the below
         # to abstract away differences
-        if "extra" in dict2:
-            # TODO: spacegrep.py calls dedent() on lines (not sure why)
-            if "lines" in dict2["extra"]:
-                dict2["extra"]["lines"] = "<masked in benchmarks>"
-            if "metavars" in dict2["extra"]:
-                # TODO: core_runner.py dedup_output() depends on the order
-                # of the elements in the list to remove similar findings
-                # but with different metavars
-                dict2["extra"]["metavars"] = "<masked in benchmarks>"
-                # the paths being different will change the fingerprint
-                dict2["extra"]["fingerprint"] = "<masked in benchmarks>"
 
-        # Abbreviate paths to avoid file-system differences
-        if "path" in dict2:
-            relative_path_start = dict2["path"].find(PERF_PATH)
-            dict2["path"] = (
-                "<masked in benchmarks>/" + dict2["path"][relative_path_start:]
-            )
+        # The benchmarks are primarily focused on ensuring
+        # the matches don't change. Previously, we masked
+        # the extra fields individually when necessary, but
+        # as they change frequently and often contain info
+        # that varies by run, it's easier to just mask them
+        if "extra" in dict2:
+            dict2["extra"] = "<masked in benchmarks>"
+
         if "check_id" in dict2:
             relative_path_start = dict2["check_id"].find(PERF_RULE_PATH)
             dict2["check_id"] = dict2["check_id"][relative_path_start:]
 
-        self.str = json.dumps(dict2, sort_keys=True)
+        json_str = json.dumps(dict2, sort_keys=True)
+
+        # Abbreviate paths to avoid file-system differences
+        # Do this here because path appears multiple times
+        self.str = re.sub(
+            rf'"path": "[A-Za-z/\-]*{PERF_PATH}',
+            f'"path": "<masked in benchmarks>/{PERF_PATH}',
+            json_str,
+        )
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SemgrepResult):
@@ -124,6 +124,7 @@ def upload(url: str, value: str) -> None:
     print(r.read().decode())
 
 
+# coupling: timings has type Semgrep_output_v1.profile
 def upload_result(
     variant_name: str, metric_name: str, value: float, timings: dict
 ) -> None:
@@ -149,11 +150,23 @@ def upload_result(
         num_lines = 0
         for target in timings["targets"]:
             assert "path" in target
-            with open(target["path"]) as f:
+            try:
+                fd = open(target["path"])
+                f = fd.read()
                 try:
                     num_lines += sum(1 for _ in f)
                 except UnicodeDecodeError:
                     pass
+                finally:
+                    fd.close()
+
+            except FileNotFoundError:
+                # Semgrep creates artificial temporary target files (for
+                # example, the Flask lifecycle harness) to aid in analysis under
+                # some circumstances. It cleans these up after it runs. If we
+                # try to open them here, we'll get an error.
+                pass
+
         lps = num_lines / (prof_times["total_time"] * num_rules)
 
         lps_url = f"{DASHBOARD_URL}/api/metric/{LPS_ENDPOINT}"
@@ -222,6 +235,8 @@ def run_semgrep(
     variant: SemgrepVariant,
     include_time: bool,
     hard_timeout: int = 0,
+    trace: bool = False,
+    trace_endpoint: Optional[str] = None,
 ) -> Tuple[float, dict]:
     args = []
     common_args = [
@@ -229,7 +244,7 @@ def run_semgrep(
         "--json",
         "--timeout",
         "0",
-        "--disable-metrics",
+        "--metrics=off",
         "--no-git-ignore",  # because files in bench/*/input/ are git-ignored
     ]
     if docker:
@@ -262,10 +277,15 @@ def run_semgrep(
             os.path.abspath(corpus.rule_dir),
         ]
     args.extend(common_args)
+    args.extend(corpus.semgrep_options)
     if variant.semgrep_extra != "":
         args.extend([variant.semgrep_extra])
     if include_time:
         args.extend(["--time"])
+    if trace:
+        args.extend(["--trace"])
+    if trace_endpoint:
+        args.extend(["--trace-endpoint semgrep-dev", trace_endpoint])
 
     # Finally, add target
     if not docker:
@@ -364,6 +384,7 @@ def prepare_benchmark_run(
                     setup_data.run_name,
                     rule_cache_dir.absolute(),
                     Path("input") / repo_name,
+                    semgrep_options=setup_data.semgrep_options,
                 )
             )
 
@@ -418,9 +439,10 @@ def run_benchmarks(
     upload: bool,
     include_time: bool,
     clean: bool,
+    trace: bool,
+    trace_endpoint: Optional[str],
     summary_file_path: str,
     findings_file_path: str,
-    findings_snapshot_update: bool,
     called_dir: str,
 ) -> None:
     def get_corpuses(config_file: Path) -> List[Corpus]:
@@ -478,10 +500,14 @@ def run_benchmarks(
                 continue
 
             std_findings = {}
+            options = sorted(
+                re.sub(r"\W+", "", option) for option in corpus.semgrep_options
+            )
             for variant in variants:
-
                 # Run variant
-                name = ".".join(["semgrep", "bench", corpus.name, variant.name])
+                name = ".".join(
+                    ["semgrep"] + options + ["bench", corpus.name, variant.name]
+                )
                 metric_name = ".".join([name, "duration"])
                 print(f"------ {name} ------")
                 try:
@@ -491,6 +517,8 @@ def run_benchmarks(
                         variant,
                         include_time,
                         hard_timeout,
+                        trace,
+                        trace_endpoint,
                     )
                 except subprocess.TimeoutExpired:
                     logger.warning(
@@ -559,10 +587,6 @@ def run_benchmarks(
         with chdir(called_dir):
             with open(findings_file_path, "w") as f:
                 json.dump(saved_findings, f)
-
-    if findings_snapshot_update:
-        with open(FINDINGS_SNAPSHOT_PATH, "w") as f:
-            json.dump(saved_findings, f)
 
     if plot_benchmarks:
         import matplotlib.pyplot as plt
@@ -643,11 +667,6 @@ def main() -> None:
         help="save findings to the json file given by the argument",
     )
     parser.add_argument(
-        "--snapshot-update",
-        help="update the snapshot to compare findings against",
-        action="store_true",
-    )
-    parser.add_argument(
         "--plot-benchmarks",
         help="display a graph of the benchmark results",
         action="store_true",
@@ -662,6 +681,17 @@ def main() -> None:
         "--clean",
         help="Regenerate rule cache and prep files",
         action="store_true",
+    )
+    parser.add_argument(
+        "--trace",
+        help="Run tracing on the benchmarks",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--trace_endpoint",
+        metavar="SEMGREP_OTEL_ENDPOINT",
+        help="Add endpoint for collecting tracing",
+        type=str,
     )
     parser.add_argument(
         "--output-time-per-rule-json",
@@ -694,9 +724,10 @@ def main() -> None:
             upload=args.upload,
             include_time=not args.no_time,
             clean=args.clean,
+            trace=args.trace,
+            trace_endpoint=args.trace_endpoint,
             summary_file_path=args.save_to,
             findings_file_path=args.save_findings_to,
-            findings_snapshot_update=args.snapshot_update,
             called_dir=called_dir,
         )
 

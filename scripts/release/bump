@@ -4,7 +4,7 @@
 #
 # This script relies on the SEMGREP_RELEASE_NEXT_VERSION env variable being set.
 # This script is usually called by 'make release', which is itself called by
-# .github/workflows/start-release.yml which sets SEMGREP_RELEASE_NEXT_VERSION.
+# .github/workflows/start-release.jsonnet which sets SEMGREP_RELEASE_NEXT_VERSION.
 
 case "$(uname -s)" in
   Linux)
@@ -36,10 +36,15 @@ update_init_py() {
   git add "$target"
 }
 
+# coupling: .github/workflows/pro-release.jsonnet
+# coupling: OSS/.github/workflows/start-release.jsonnet
 update_version_ml() {
-  target=semgrep-core/src/core_cli/version.ml
+  # The coupled files check for this exact path for the presence
+  # of the version string below.
+  target=src/core/Version.ml
   targets+=" $target"
   echo "Updating $target"
+  # The coupled files check for this exact string formatting.
   sed_in_place 's/let version = ".*"/let version = "'"$release"'"/g' "$target"
   git add "$target"
 }
@@ -67,6 +72,24 @@ update_cli_setup_py() {
   git add "$target"
 }
 
+update_dune_project() {
+  target=dune-project
+  echo "Updating $target"
+  sed_in_place 's/^(version .*)$/(version '"$release"')/' "$target"
+  git add "$target"
+}
+
+# Update the semgrep version in 'semgrep.opam'.
+# Normally, this would be done with 'dune build semgrep.opam'
+# after we update 'dune-project'. This solution avoids having to set up the
+# build environment with 'dune'.
+update_opam_file() {
+  target=semgrep.opam
+  echo "Updating $target"
+  sed_in_place 's/^version: ".*"$/version: "'"$release"'"/' "$target"
+  git add "$target"
+}
+
 # Update files containing the release ID.
 #
 # Ideally this shouldn't modify source files,
@@ -76,6 +99,8 @@ bump() {
   update_setup_py
   update_cli_setup_py
   update_version_ml
+  update_dune_project
+  update_opam_file
 }
 
 release="${SEMGREP_RELEASE_NEXT_VERSION}"
@@ -106,7 +131,7 @@ fi
 
 bump
 
-if git status -s | grep -vq 'cli/src/semgrep/__init__.py\|cli/setup.py\|setup.py\|semgrep-core/src/core_cli/version.ml'; then
+if git status -s | grep -vq 'cli/src/semgrep/__init__.py\|cli/setup.py\|setup.py\|src/core/Version.ml\|dune-project\|semgrep.opam'; then
   error <<EOF
 The release branch contains unexpected changes, cancelling release.
 EOF

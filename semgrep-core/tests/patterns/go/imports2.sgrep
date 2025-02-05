@@ -1,7 +1,0 @@
-rules:
-  - id: foo
-    pattern: |
-      import "$X"
-    languages: ["go"]
-    message: imported $X
-    severity: INFO

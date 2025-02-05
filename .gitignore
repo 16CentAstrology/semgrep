@@ -1,13 +1,23 @@
+# coupling: if you modify this file from the pro repo, you'll have
+# to also update .dockerignore
+
 # dune
-_build
+_build/
 # starting from dune 2.8.2, those are actually not generated anymore
 .merlin
 
-# bisect_ppx
-_coverage
-*.coverage
+# opam files are now generated from dune-project when running 'dune build':
+/*.opam
+# but we keep the one used for installing the project dependencies with
+# 'opam install --deps-only .':
+!/semgrep.opam
 
-semgrep_core/sgrep.install
+# local opam switch
+_opam/
+
+# bisect_ppx
+_coverage/
+*.coverage
 
 # pad's stuff (but better to put in ~pad/config/commons/gitignore)
 /top.ml
@@ -67,6 +77,10 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 
+# src/targeting/Unit_guess_lang.ml creates a top-level tmp folder
+# "We don't delete the files when we're done because it's easier when troubleshooting tests."
+/tmp/
+
 # Translations
 *.mo
 *.pot
@@ -88,7 +102,8 @@ instance/
 docs/_build/
 
 # PyBuilder
-target/
+#target/
+#pad: commented because we now have also src/target/ which is valid code
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -155,23 +170,34 @@ dmypy.json
 
 ### custom stuff
 
+# JS stuff
+*.vscode-test
+out
+
 # semgrep-core build artifacts
 TAGS
-/semgrep-core/log_config.json
-/semgrep-core/.vscode/settings.json
+log_config.json
+.vscode/settings.json
 /scripts/oncall-email/today.json
 /scripts/oncall-email/yesterday.json
 
 # Do not check in compiled binaries
 /cli/src/semgrep/bin/*
 !/cli/src/semgrep/bin/__init__.py
-/semgrep-core/bin
 
 # Ignore bench files
 perf/bench
-!perf/bench/dogfood
-!perf/bench/gitlab
-!perf/bench/dummy
+
+# The following instructions have no effect because 'perf/bench' is a parent
+# directory that is gitignored by the pattern above, causing git's scanner
+# to stop without inspecting the children paths.
+#
+# TODO: If we want to not gitignore these paths, they should
+# go in a separate folder i.e. not side-by-side with temporary folders.
+#
+# !perf/bench/dogfood
+# !perf/bench/gitlab
+# !perf/bench/dummy
 
 # Local actions testing
 act/
@@ -186,3 +212,10 @@ act/
 
 # Artifacts from CI
 scripts/release/release_body.txt
+
+# nix
+result
+# direnv
+.direnv
+# Personal symlink to semgrep-proprietary used by 'make pro'
+/semgrep-proprietary

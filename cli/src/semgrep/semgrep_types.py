@@ -4,11 +4,13 @@ from typing import Collection
 from typing import Mapping
 from typing import NewType
 from typing import Optional
+from uuid import UUID
+from uuid import uuid4
 
 from attrs import frozen
 
 from semgrep.error import UnknownLanguageError
-from semgrep.rule_lang import Span
+from semgrep.error_location import Span
 from semgrep.types import JsonObject
 
 Mode = NewType("Mode", str)
@@ -17,6 +19,16 @@ Shebang = str
 
 JOIN_MODE = Mode("join")
 SEARCH_MODE = DEFAULT_MODE = Mode("search")
+FROZEN_ID: UUID = uuid4()
+
+
+def get_frozen_id() -> UUID:
+    """
+    Return a frozen UUID to identify a local scan and its corresponding results (if any)
+    within the Semgrep App. We avoid initializing this UUID within our state object to
+    prevent circular dependencies.
+    """
+    return FROZEN_ID
 
 
 class Language(str):
@@ -28,7 +40,7 @@ class Language(str):
 @frozen
 class LanguageDefinition:
     """
-    Mirrors schema of lang.json (see lang/README.md) for each language
+    Mirrors schema of lang.json (see semgrep_interfaces/README.md) for each language
     """
 
     id: Language
@@ -37,22 +49,28 @@ class LanguageDefinition:
     exts: Collection[FileExtension]
     reverse_exts: Collection[str]
     shebangs: Collection[Shebang]
+    is_target_language: bool
 
     @classmethod
     def from_dict(cls, data: JsonObject) -> "LanguageDefinition":
+        # Assume all the fields exist in lang.json, which is generated.
+        # Optional fields may be set to 'null'.
         return cls(
             id=Language(data["id"]),
             name=data["name"],
             keys=data["keys"],
             exts=data["exts"],
-            reverse_exts=data.get("reverse_exts", data["exts"]),
+            reverse_exts=data["reverse_exts"]
+            if data["reverse_exts"] is not None
+            else data["exts"],
             shebangs=data.get("shebangs", []),
+            is_target_language=data["is_target_language"],
         )
 
 
 class _LanguageData:
     def __init__(self) -> None:
-        with (Path(__file__).parent / "lang" / "lang.json").open() as fd:
+        with (Path(__file__).parent / "semgrep_interfaces" / "lang.json").open() as fd:
             data = json.load(fd)
 
         self.definition_by_id: Mapping[Language, LanguageDefinition] = {
@@ -85,15 +103,23 @@ class _LanguageData:
             spans = [span.with_context(before=1, after=1)] if span else []
             raise UnknownLanguageError(
                 short_msg=f"invalid language: {normalized}",
-                long_msg=f"unsupported language: {normalized}. {self.show_suppported_languages_message()}",
+                long_msg=f"unsupported language: {normalized}. {self.show_suppported_languages_message()}\n\nYou may need to update your version of Semgrep, if you are on an old version that does not yet support this language.",
                 spans=spans,
             )
 
     def show_suppported_languages_message(self) -> str:
-        return f"supported languages are: {', '.join(self.all_language_keys)}"
+        languages_usable_in_the_languages_field = sorted(
+            {
+                key: value
+                # "generic", "regex", and "none" are the only non-languages
+                # that are supported in the "languages" field for historical reasons.
+                for key, value in self.lang_by_key.items()
+                if key not in ["spacegrep", "aliengrep"]
+            }
+        )
+        return f"supported languages are: {', '.join(languages_usable_in_the_languages_field)}"
 
 
 LANGUAGE = _LanguageData()
-
 
 ALLOWED_GLOB_TYPES = ("include", "exclude")

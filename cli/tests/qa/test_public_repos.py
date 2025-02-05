@@ -10,9 +10,9 @@ from pathlib import Path
 
 import appdirs
 import pytest
+from tests.conftest import TESTS_PATH
+from tests.semgrep_runner import SEMGREP_BASE_SCAN_COMMAND
 
-from ..conftest import TESTS_PATH
-from ..semgrep_runner import SEMGREP_BASE_COMMAND
 from .public_repos import REPOS
 
 # Some improbable string that was implanted in test targets [how?] [why?].
@@ -53,7 +53,7 @@ def chdir(dirname=None):
 
 
 def assert_sentinel_results(repo_path, sentinel_path, language):
-    cmd = SEMGREP_BASE_COMMAND + [
+    cmd = SEMGREP_BASE_SCAN_COMMAND + [
         "--disable-version-check",
         "--pattern",
         SENTINEL_PATTERN,
@@ -65,6 +65,11 @@ def assert_sentinel_results(repo_path, sentinel_path, language):
         # Turn off optimizations since it skips parsing when it can and this test is testing parsing
         "--optimizations=none",
     ]
+
+    # This is useful for debugging. I don't see a downside to printing
+    # such important debugging info when running tests so I'm leaving it
+    # -- Martin
+    print(f"semgrep command: {cmd}")
 
     # nosemgrep: python.lang.security.audit.dangerous-subprocess-use.dangerous-subprocess-use
     semgrep_run = subprocess.run(cmd, capture_output=True, encoding="utf-8")
@@ -157,10 +162,9 @@ def test_semgrep_on_repo(monkeypatch, tmp_path, repo):
         sentinel_path = repo_path / sentinel_info["filename"]
         with sentinel_path.open("w") as sentinel_file:
             sentinel_file.write(sentinel_info["file_contents"])
-
         assert_sentinel_results(repo_path, sentinel_path, language)
 
-    cmd = SEMGREP_BASE_COMMAND + [
+    cmd = SEMGREP_BASE_SCAN_COMMAND + [
         "--disable-version-check",
         "--config=rules/regex-sentinel.yaml",
         "--strict",
