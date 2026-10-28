@@ -88,10 +88,10 @@ let full_lang_info =
     (Lang.Clojure, "clojure", ".clj");
     (Lang.Xml, "xml", ".xml");
     (Lang.Dart, "dart", ".dart");
-    (Lang.Ql, "ql", ".ql");
     (Lang.Move_on_sui, "move_on_sui", ".move");
     (Lang.Move_on_aptos, "move_on_aptos", ".move");
     (Lang.Fga, "fga", ".fga");
+    (Lang.Objc, "objc", ".m");
   ]
 
 (*****************************************************************************)
@@ -255,6 +255,8 @@ let language_exceptions =
     (Lang.Jsonnet, [ "dots_stmts"; "deep_exprstmt"; "dots_nested_stmts" ]);
     (* TODO *)
     (Lang.Clojure, [ "deep_exprstmt"; "dots_nested_stmts" ]);
+    (* good boy *)
+    (Lang.Dart, []);
   ]
 
 (* TODO: infer dir and ext from lang using Lang helper functions *)
@@ -302,6 +304,7 @@ let maturity_tests () =
       make_maturity_tests Lang.Ruby "ruby" ".rb" GA;
       make_maturity_tests Lang.Ts "ts" ".ts" GA;
       make_maturity_tests Lang.Scala "scala" ".scala" GA;
+      make_maturity_tests Lang.Dart "dart" ".dart" GA;
       (* Beta *)
       make_maturity_tests Lang.Hack "hack" ".hack" Beta;
       make_maturity_tests Lang.Kotlin "kotlin" ".kt" Beta;
@@ -327,7 +330,7 @@ let maturity_tests () =
       make_maturity_tests Lang.Jsonnet "jsonnet" ".jsonnet" Experimental;
       make_maturity_tests Lang.Clojure "clojure" ".clj" Experimental
       (* Not even experimental yet *)
-      (* HTML, XML, Dart *);
+      (* HTML, XML *);
     ]
 
 (*****************************************************************************)
@@ -706,7 +709,7 @@ let prefilter_ranking_tests =
   let module F = Prefiltering.Formula in
   let module P = Prefiltering.Predicate in
   let str s = F.pred (P.String { needle = s; case_sensitive = true }) in
-  let re s = F.pred (P.Regex (Pcre2_.pcre_compile s)) in
+  let re s = F.pred (P.Regex (Pcre2_.compile_exn ~options:[ `MULTILINE ] s)) in
   let and_ xs = Option.get (F.and_ xs) in
   let or_ xs = Option.get (F.or_ xs) in
   let check name formula expected =

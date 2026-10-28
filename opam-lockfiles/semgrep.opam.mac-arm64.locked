@@ -45,7 +45,7 @@ depends: [
   "biniou" {= "1.2.2"}
   "bos" {= "0.3.0"}
   "ca-certs" {= "1.0.3"}
-  "ca-certs-nss" {= "3.123.1"}
+  "ca-certs-nss" {= "3.131.1"}
   "calendar" {= "3.0.0"}
   "camlp-streams" {= "5.0.1"}
   "carton" {= "0.7.2"}
@@ -276,12 +276,16 @@ depexts: [
 dev-repo: "git+https://github.com/semgrep/semgrep.git"
 pin-depends: [
   [
+    "ca-certs.1.0.3"
+    "git+https://github.com/semgrep/ca-certs.git#af20ad16ad063d892324d7edf8f3bd9564461025"
+  ]
+  [
     "memtrace.dev"
     "git+https://github.com/janestreet/memtrace.git#a88470c3de884182503ba5fcd4729e281e544731"
   ]
   [
     "obackward.dev"
-    "git+https://github.com/semgrep/obackward.git#e1c16766976b4fadd97097b96f96666e8e1cb98c"
+    "git+https://github.com/semgrep/obackward.git#6efca08b2a98317b1d705c1e88b8342ec558205c"
   ]
   [
     "ocaml-variants.5.4.0"
@@ -309,15 +313,15 @@ pin-depends: [
   ]
   [
     "pcre2.dev"
-    "git+https://github.com/semgrep/pcre2-ocaml.git#e88c082341e4ff278eed892c17032df83b26e585"
+    "git+https://github.com/semgrep/pcre2-ocaml.git#b763e279b7aa624c9f1adf0afdd45ee7555e2460"
   ]
   [
     "pyro-caml-instruments.dev"
-    "git+https://github.com/semgrep/pyro-caml.git#d6941d16419a7d73d60126a70400fdb4d207e2ab"
+    "git+https://github.com/semgrep/pyro-caml.git#5a182955404a24cfc92f4d401b2ef12be8d96149"
   ]
   [
     "pyro-caml-ppx.dev"
-    "git+https://github.com/semgrep/pyro-caml.git#d6941d16419a7d73d60126a70400fdb4d207e2ab"
+    "git+https://github.com/semgrep/pyro-caml.git#5a182955404a24cfc92f4d401b2ef12be8d96149"
   ]
   [
     "semgrep-interfaces.dev"
@@ -325,7 +329,7 @@ pin-depends: [
   ]
   [
     "tree-sitter.dev"
-    "./libs/ocaml-tree-sitter-semgrep/core"
+    "file://./libs/ocaml-tree-sitter-semgrep/core"
   ]
 ]
 x-maintenance-intent: ["(latest)"]

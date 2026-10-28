@@ -142,14 +142,14 @@ local slack = {
 //
 // coupling: if you modify the compiler pin sha you will need to bump this
 // prefix (or similar) to invalidate the cache
-local opam_cache_version = 'v7';
+local opam_cache_version = 'v8';
 
 // We pin the upstream opam-repository to a commit rather than
 // tracking its HEAD.
 // coupling: bump opam_cache_version above when changing this so the cached
 // opam root (which embeds the repository) is invalidated.
 // coupling: keep this in sync with OPAM_REPOSITORY_PIN in OSS/Makefile.
-local opam_repository_pin = '78d29aba187e8362b8ab86c189790c0af9153d4b';
+local opam_repository_pin = '922f67e068446a8d8e809a40251a259bd0549552';
 
 // this must be done after the checkout as opam installs itself
 // locally in the project folder (/home/runner/work/semgrep/semgrep/_opam)
@@ -277,6 +277,13 @@ local build_bundle_steps =
       run: './scripts/bundle-with-libs.sh && ls -a bundle',
     },
   ];
+
+// brew fails re-taking the openssl@3 lock when linking openssl@4 in one process.
+// Run before any `brew install`, incl. opam depexts (`make install-deps`).
+local brew_unlink_openssl_step = {
+  name: 'Unlink openssl@3 (brew lock workaround)',
+  run: 'brew unlink openssl@3 || true',
+};
 
 local build_test_steps(opam_switch=opam_switch_default, name='semgrep-core', build_bundle=false, extra_env={}, test_target='test') =
   [
@@ -420,6 +427,7 @@ local test_wheel_steps(arch, copy_semgrep_pro=false) = [
   opam_switch: opam_switch,
   opam_setup: opam_setup,
   build_test_steps: build_test_steps,
+  brew_unlink_openssl_step: brew_unlink_openssl_step,
   build_wheel_steps: build_wheel_steps,
   test_wheel_steps: test_wheel_steps,
   retag_sms_docker_image_step: retag_sms_docker_image_step,

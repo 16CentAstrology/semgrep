@@ -10,13 +10,20 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
 # LICENSE for more details.
 #
+import base64
 import uuid
+from http.client import HTTPConnection
 
 import pytest
+import requests
 
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
-from semgrep.app.scans import _ConfigPollTimeout
+from semgrep.app.scan_config import _ConfigPollTimeout
+from semgrep.app.scan_config import _poll_for_config_v2
+from semgrep.app.scan_config import fetch_scan_config
+from semgrep.app.scan_config import ScanConfigResponse
 from semgrep.app.scans import ScanHandler
+from semgrep.env import Env
 
 
 SEMGREP_URL = "https://semgrep.dev"
@@ -55,17 +62,19 @@ def mock_state(mocker):
     state.local_scan_id = uuid.UUID(SCAN_REQUEST_ID)
     state.env.semgrep_url = SEMGREP_URL
     state.env.sms_scan_id = None
+    state.env.job_context = None
     state.env.upload_findings_timeout = 30
     state.env.v2_poll_timeout_seconds = 45
     state.env.v2_post_max_attempts = 3
     state.env.v2_overall_timeout_minutes = 3
     mocker.patch("semgrep.app.scans.get_state", return_value=state)
+    mocker.patch("semgrep.app.scan_config.get_state", return_value=state)
     return state
 
 
 @pytest.fixture
 def mock_sleep(mocker):
-    return mocker.patch("semgrep.app.scans.sleep")
+    return mocker.patch("semgrep.app.scan_config.sleep")
 
 
 @pytest.fixture
@@ -84,10 +93,10 @@ def mock_args(mocker):
 
 @pytest.mark.quick
 @pytest.mark.no_semgrep_cli
-def test_start_scan_v2_success_immediate(
+def test_fetch_scan_config_success_immediate(
     mocker, mock_state, mock_sleep, handler, mock_args
 ):
-    """Returns ScanResponse immediately when config is ready on the first poll."""
+    """Returns config immediately when ready on the first poll."""
     project_metadata, project_config = mock_args
     mock_state.app_session.post.return_value = _make_response(
         mocker, CREATE_SCAN_RESPONSE
@@ -96,20 +105,27 @@ def test_start_scan_v2_success_immediate(
         mocker, SUCCESS_CONFIG_RESPONSE
     )
 
-    result = handler.start_scan_v2(project_metadata, project_config)
+    result = fetch_scan_config(
+        out.CreateScanRequestV2(
+            scan_metadata=handler.scan_metadata,
+            project_metadata=project_metadata,
+            project_config=project_config.to_CiConfigFromRepo(),
+        )
+    )
 
-    assert isinstance(result, out.ScanResponse)
+    assert isinstance(result, ScanConfigResponse)
     assert result.info.id == 42
+    assert mock_state.app_session.post.call_args.kwargs["headers"] == {}
     assert mock_state.app_session.get.call_count == 1
     mock_sleep.assert_not_called()
 
 
 @pytest.mark.quick
 @pytest.mark.no_semgrep_cli
-def test_start_scan_v2_success_after_pending(
+def test_fetch_scan_config_success_after_pending(
     mocker, mock_state, mock_sleep, handler, mock_args
 ):
-    """Polls through Pending responses before returning ScanResponse on Success."""
+    """Polls through Pending responses before returning config on Success."""
     project_metadata, project_config = mock_args
     mock_state.app_session.post.return_value = _make_response(
         mocker, CREATE_SCAN_RESPONSE
@@ -120,16 +136,22 @@ def test_start_scan_v2_success_after_pending(
         _make_response(mocker, SUCCESS_CONFIG_RESPONSE),
     ]
 
-    result = handler.start_scan_v2(project_metadata, project_config)
+    result = fetch_scan_config(
+        out.CreateScanRequestV2(
+            scan_metadata=handler.scan_metadata,
+            project_metadata=project_metadata,
+            project_config=project_config.to_CiConfigFromRepo(),
+        )
+    )
 
-    assert isinstance(result, out.ScanResponse)
+    assert isinstance(result, ScanConfigResponse)
     assert mock_state.app_session.get.call_count == 3
     assert mock_sleep.call_count == 2
 
 
 @pytest.mark.quick
 @pytest.mark.no_semgrep_cli
-def test_start_scan_v2_config_failure(
+def test_fetch_scan_config_config_failure(
     mocker, mock_state, mock_sleep, handler, mock_args
 ):
     """Raises immediately when the server signals config generation failed."""
@@ -142,7 +164,13 @@ def test_start_scan_v2_config_failure(
     )
 
     with pytest.raises(Exception, match="Config generation failed"):
-        handler.start_scan_v2(project_metadata, project_config)
+        fetch_scan_config(
+            out.CreateScanRequestV2(
+                scan_metadata=handler.scan_metadata,
+                project_metadata=project_metadata,
+                project_config=project_config.to_CiConfigFromRepo(),
+            )
+        )
 
     assert mock_state.app_session.get.call_count == 1
     mock_sleep.assert_not_called()
@@ -171,6 +199,31 @@ def test_start_scan_uses_v2(mocker, mock_state, mock_sleep, mock_args):
     assert get_url.endswith("/config")
 
 
+@pytest.mark.quick
+@pytest.mark.no_semgrep_cli
+@pytest.mark.parametrize("missing_field", ["config", "engine_params"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_start_scan_requires_config_and_engine_params(
+    mocker, mock_state, handler, mock_args, missing_field, dry_run
+):
+    handler.scan_metadata.dry_run = dry_run
+    project_metadata, project_config = mock_args
+    mock_state.app_session.post.return_value = _make_response(
+        mocker, CREATE_SCAN_RESPONSE
+    )
+    response = dict(SUCCESS_CONFIG_RESPONSE)
+    del response[missing_field]
+    mock_state.app_session.get.return_value = _make_response(mocker, response)
+    handle_response = mocker.patch.object(handler, "_handle_scan_response")
+
+    with pytest.raises(Exception, match=f"{missing_field} is missing"):
+        handler.start_scan(project_metadata, project_config)
+
+    assert mock_state.app_session.post.call_count == 1
+    assert mock_state.app_session.get.call_count == 1
+    handle_response.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # POST-retry orchestration tests (mock _poll_for_config_v2 directly)
 # ---------------------------------------------------------------------------
@@ -178,28 +231,69 @@ def test_start_scan_uses_v2(mocker, mock_state, mock_sleep, mock_args):
 
 @pytest.mark.quick
 @pytest.mark.no_semgrep_cli
-def test_start_scan_v2_retries_post_all_timeouts(
-    mocker, mock_state, mock_sleep, handler, mock_args
+@pytest.mark.parametrize(
+    "job_context",
+    [
+        '{"version":1,"job_id":"abc","task_key":"scan/one"}',
+        '  {\n  "task_key": "scan/one"\n}',
+        '{"task_key":"扫描/🚀"}',
+        "not JSON",
+        "null",
+        "",
+    ],
+)
+def test_fetch_scan_config_retries_post_all_timeouts(
+    mocker, monkeypatch, mock_state, mock_sleep, handler, mock_args, job_context
 ):
     """Retries POST up to _V2_POST_MAX_ATTEMPTS times on repeated poll timeouts, then raises."""
     project_metadata, project_config = mock_args
-    mock_state.app_session.post.return_value = _make_response(
-        mocker, CREATE_SCAN_RESPONSE
-    )
-    mocker.patch.object(
-        handler, "_poll_for_config_v2", side_effect=_ConfigPollTimeout("timed out")
+    monkeypatch.setenv("SEMGREP_JOB_CONTEXT", job_context)
+    mock_state.env.job_context = Env().job_context
+    sent_headers = []
+
+    def post(url, **kwargs):
+        prepared = requests.Request("POST", url, **kwargs).prepare()
+        connection = HTTPConnection("semgrep.dev")
+        connection.putrequest("POST", "/api/cli/v2/scans")
+        for name, value in prepared.headers.items():
+            connection.putheader(name, value)
+        sent_headers.append(prepared.headers["X-Semgrep-Job-Context"])
+        mock_state.env.job_context = "changed after first attempt"
+        return _make_response(mocker, CREATE_SCAN_RESPONSE)
+
+    mock_state.app_session.post.side_effect = post
+    poll = mocker.patch(
+        "semgrep.app.scan_config._poll_for_config_v2",
+        side_effect=_ConfigPollTimeout("timed out"),
     )
 
     with pytest.raises(Exception, match="timed out after 3 POST attempts"):
-        handler.start_scan_v2(project_metadata, project_config)
+        fetch_scan_config(
+            out.CreateScanRequestV2(
+                scan_metadata=handler.scan_metadata,
+                project_metadata=project_metadata,
+                project_config=project_config.to_CiConfigFromRepo(),
+            )
+        )
 
     assert mock_state.app_session.post.call_count == 3
-    assert handler._poll_for_config_v2.call_count == 3
+    post_calls = mock_state.app_session.post.call_args_list
+    assert all(call == post_calls[0] for call in post_calls)
+    assert poll.call_count == 3
+    assert len(set(sent_headers)) == 1
+    for header in sent_headers:
+        assert header.startswith("base64:")
+        assert (
+            base64.b64decode(header.removeprefix("base64:"), validate=True).decode(
+                "utf-8"
+            )
+            == job_context
+        )
 
 
 @pytest.mark.quick
 @pytest.mark.no_semgrep_cli
-def test_start_scan_v2_success_on_second_post_attempt(
+def test_fetch_scan_config_success_on_second_post_attempt(
     mocker, mock_state, mock_sleep, handler, mock_args
 ):
     """Returns successfully when the second POST attempt's poll resolves."""
@@ -208,22 +302,27 @@ def test_start_scan_v2_success_on_second_post_attempt(
         mocker, CREATE_SCAN_RESPONSE
     )
     scan_response = mocker.MagicMock()
-    mocker.patch.object(
-        handler,
-        "_poll_for_config_v2",
+    poll = mocker.patch(
+        "semgrep.app.scan_config._poll_for_config_v2",
         side_effect=[_ConfigPollTimeout("timed out"), scan_response],
     )
 
-    result = handler.start_scan_v2(project_metadata, project_config)
+    result = fetch_scan_config(
+        out.CreateScanRequestV2(
+            scan_metadata=handler.scan_metadata,
+            project_metadata=project_metadata,
+            project_config=project_config.to_CiConfigFromRepo(),
+        )
+    )
 
     assert result is scan_response
     assert mock_state.app_session.post.call_count == 2
-    assert handler._poll_for_config_v2.call_count == 2
+    assert poll.call_count == 2
 
 
 @pytest.mark.quick
 @pytest.mark.no_semgrep_cli
-def test_start_scan_v2_failure_does_not_retry_post(
+def test_fetch_scan_config_failure_does_not_retry_post(
     mocker, mock_state, mock_sleep, handler, mock_args
 ):
     """Does not retry the POST when the poll raises a hard failure (not _ConfigPollTimeout)."""
@@ -231,16 +330,22 @@ def test_start_scan_v2_failure_does_not_retry_post(
     mock_state.app_session.post.return_value = _make_response(
         mocker, CREATE_SCAN_RESPONSE
     )
-    mocker.patch.object(
-        handler,
-        "_poll_for_config_v2",
+    poll = mocker.patch(
+        "semgrep.app.scan_config._poll_for_config_v2",
         side_effect=Exception("Config generation failed"),
     )
 
     with pytest.raises(Exception, match="Config generation failed"):
-        handler.start_scan_v2(project_metadata, project_config)
+        fetch_scan_config(
+            out.CreateScanRequestV2(
+                scan_metadata=handler.scan_metadata,
+                project_metadata=project_metadata,
+                project_config=project_config.to_CiConfigFromRepo(),
+            )
+        )
 
     assert mock_state.app_session.post.call_count == 1
+    assert poll.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +365,7 @@ def test_poll_for_config_v2_raises_config_poll_timeout_when_expired(
     )
 
     with pytest.raises(_ConfigPollTimeout):
-        handler._poll_for_config_v2(SCAN_REQUEST_ID, scan_info, timeout_seconds=0)
+        _poll_for_config_v2(SCAN_REQUEST_ID, scan_info, timeout_seconds=0)
 
     mock_state.app_session.get.assert_not_called()
 
@@ -335,3 +440,23 @@ def test_gradle_module_attribution_engine_params(handler, mocker, enabled):
         engine_params=out.EngineConfiguration.from_json(params)
     )
     assert handler.gradle_module_attribution is bool(enabled)
+
+
+@pytest.mark.quick
+@pytest.mark.no_semgrep_cli
+@pytest.mark.parametrize("unauthorized_on", ["post", "get"])
+def test_start_scan_invalid_token(mocker, mock_state, mock_args, unauthorized_on):
+    project_metadata, project_config = mock_args
+    mock_state.app_session.post.return_value = _make_response(
+        mocker, CREATE_SCAN_RESPONSE
+    )
+    getattr(mock_state.app_session, unauthorized_on).return_value = _make_response(
+        mocker, {}, status_code=401
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        ScanHandler(enable_transitive_reachability=None).start_scan(
+            project_metadata, project_config
+        )
+
+    assert exc.value.code == 13

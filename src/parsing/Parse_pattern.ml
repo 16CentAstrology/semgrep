@@ -174,10 +174,6 @@ let parse_pattern_by_lang options lang str =
       let res = Parse_terraform_tree_sitter.parse_pattern str in
       let pattern = extract_pattern_from_tree_sitter_result res in
       Terraform_to_generic.any pattern
-  | Lang.Ql ->
-      let res = Parse_ql_tree_sitter.parse_pattern str in
-      let pattern = extract_pattern_from_tree_sitter_result res in
-      QL_to_generic.any pattern
   (* Tree-sitter only and directly to generic AST *)
   | Lang.Csharp ->
       let parse_pattern =
@@ -241,6 +237,9 @@ let parse_pattern_by_lang options lang str =
       extract_pattern_from_tree_sitter_result res
   | Lang.Swift ->
       let res = Parse_swift_tree_sitter.parse_pattern str in
+      extract_pattern_from_tree_sitter_result res
+  | Lang.Objc ->
+      let res = Parse_objc_tree_sitter.parse_pattern str in
       extract_pattern_from_tree_sitter_result res
   (* external plugins *)
   | Lang.Apex ->

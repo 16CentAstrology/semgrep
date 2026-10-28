@@ -126,16 +126,22 @@ let partition_xpatterns xs =
       | XP.Sem (x, _lang) -> Stack_.push (x, inside, pid, str) semgrep
       | XP.Spacegrep x -> Stack_.push (x, pid, str) spacegrep
       | XP.Aliengrep x -> Stack_.push (x, pid, str) aliengrep
-      | XP.Regexp x -> Stack_.push (Pcre2_.pcre_compile x, pid, str) regexp);
+      | XP.Regexp x ->
+          Stack_.push
+            ( Pcre2_.compile_exn ~options:[ `MULTILINE ] x
+              (* was already validated in rule parsing *),
+              pid,
+              str )
+            regexp);
   (List.rev !semgrep, List.rev !spacegrep, List.rev !aliengrep, List.rev !regexp)
 
 let group_matches_per_pattern_id (xs : Core_match.t list) : id_to_match_results
     =
-  let h = Hashtbl.create 101 in
+  let h = Base.Hashtbl.Poly.create ~size:101 () in
   xs
   |> List.iter (fun (m : PM.t) ->
       let id = int_of_string (Rule_ID.to_string m.rule_id.id) in
-      Hashtbl_.push h id m);
+      Hashtbl_.Base.push h id m);
   h
 
 let error_with_rule_id rule_id (error : Core_error.t) =
@@ -958,7 +964,7 @@ and evaluate_formula env opt_context
 and evaluate_formula_kind env opt_context (kind : Rule.formula_kind) =
   match kind with
   | R.P ({ XP.pid = id; pstr = pstr, tok; _ } as xpat) ->
-      let match_results = Hashtbl_.get_stack env.pattern_matches id in
+      let match_results = Hashtbl_.Base.get_stack env.pattern_matches id in
       let kind = if Xpattern.is_regexp xpat then RM.Regexp else RM.Plain in
       let ranges =
         match_results
@@ -1138,10 +1144,7 @@ let check_rule ~matches_hook ({ R.mode = `Search formula; _ } as r) xconf
   let rule_id = fst r.id in
 
   let%trace_debug sp = "Match_search_mode.check_rule" in
-  Tracing.add_data_to_span sp
-    [
-      ("rule_id", `String (rule_id |> Rule_ID.to_string)); ("taint", `Bool false);
-    ];
+  Tracing.add_data_to_span sp (Trace_data.data_of_rule (r :> R.t));
 
   let res, final_ranges = matches_of_formula xconf r xtarget formula None in
   let errors = res.errors |> E.ErrorSet.map (error_with_rule_id rule_id) in

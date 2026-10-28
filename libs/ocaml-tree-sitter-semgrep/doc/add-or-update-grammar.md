@@ -19,7 +19,11 @@ A registry **key** identifies an upstream grammar. A **destination** identifies
 one generated parser. They are usually identical (`python`), but one key can
 produce several destinations (`typescript` produces `typescript` and `tsx`).
 `test-grammar` tests a key and its dialects; `regen-grammar` writes one destination
-from that key's `regen` list.
+from that key's `regen` list. Optional `test_sublangs` lists standalone test
+directories (defaults to the key); it includes test-only dialects such as
+`php-only` that are absent from `regen`. Nested grammars under `semgrep-<key>/` that are
+not registry keys (e.g. soql/sosl under sfapex) inherit that key's
+`tree_sitter` pin.
 
 ## Prepare the tools
 
@@ -135,6 +139,36 @@ module.exports = grammar(base, {
   rules: {},
 });
 ```
+
+Create `tree-sitter.json` beside `grammar.js`. ABI 15 requires semantic-version
+metadata; tree-sitter validates it when generating.
+
+```json
+{
+  "grammars": [
+    { "name": "mylang", "scope": "source.mylang", "path": "." }
+  ],
+  "metadata": {
+    "version": "0.0.0",
+    "license": "LGPL-2.1",
+    "description": "Semgrep-extended mylang grammar for tree-sitter",
+    "authors": [{ "name": "Semgrep" }],
+    "links": { "repository": "https://github.com/semgrep/semgrep" }
+  },
+  "bindings": {
+    "c": true,
+    "go": false,
+    "node": false,
+    "python": false,
+    "rust": false,
+    "swift": false
+  }
+}
+```
+
+Use one metadata file beside each `grammar.js` in a multi-dialect wrapper.
+Tree-sitter >= 0.25 generates ABI 15 from this metadata; older pinned CLIs
+retain their supported ABI. Semgrep's shared runtime accepts ABIs 13 through 15.
 
 This initially inherits the upstream grammar unchanged. Extend `rules` to accept
 Semgrep metavariables and ellipses in the appropriate language constructs. Add

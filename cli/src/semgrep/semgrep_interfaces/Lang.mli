@@ -53,6 +53,7 @@ type t = Language.t =
   | Lua
   | Move_on_sui
   | Move_on_aptos
+  | Objc
   | Ocaml
   | Php
   | Powershell
@@ -61,7 +62,6 @@ type t = Language.t =
   | Python2
   | Python3
   | Python
-  | Ql
   | R
   | Ruby
   | Rust
@@ -160,7 +160,7 @@ val of_opt_exn : t option -> t
 
 (* accept any variants *)
 val is_js : t -> bool
-val lang_map : (string, t) ROHashtbl.t
+val lang_map : (string, t) ROHashtbl.Base.t
 
 (* accept any variants *)
 val is_proprietary : t -> bool
