@@ -699,6 +699,56 @@ let regexp_prefilter_tests =
       check {|abc\cIdef|} (F.and_ [ str "abc"; str "def" ]);
     ]
 
+let utf8_regex_prefilter_tests =
+  let module P = Prefiltering.Predicate in
+  let predicate = P.Regex (Pcre2_.compile_exn "TOKEN") in
+  Testo.categorize "UTF-8 regex prefilter"
+    [
+      t "valid content can skip repeated UTF-8 checks" (fun () ->
+          let content = "TOKEN ☃" in
+          let utf8_valid = lazy_safe (String.is_valid_utf_8 content) in
+          Alcotest.(check bool) "valid UTF-8" true (Lazy_safe.force utf8_valid);
+          Alcotest.(check bool)
+            "match" true
+            (P.eval ~utf8_valid predicate content));
+      t "invalid content retains conservative error handling" (fun () ->
+          let content = "TOKEN \xff" in
+          let utf8_valid = lazy_safe (String.is_valid_utf_8 content) in
+          Alcotest.(check bool)
+            "invalid UTF-8" false
+            (Lazy_safe.force utf8_valid);
+          Alcotest.(check bool)
+            "allow rule on PCRE2 error" true
+            (P.eval ~utf8_valid predicate content));
+      t "known invalid content has no regex matches" (fun () ->
+          let content = "TOKEN \xff" in
+          let regex = Pcre2_.compile_exn "TOKEN" in
+          let matches =
+            Xpattern_match_regexp.regexp_matcher ~utf8_valid:false content
+              (Fpath.v "unused") regex
+          in
+          Alcotest.(check int) "matches" 0 (List.length matches));
+    ]
+
+let file_prefilter_memo_tests =
+  let module F = Prefiltering.Formula in
+  let module P = Prefiltering.Predicate in
+  Testo.categorize "file prefilter memoization"
+    [
+      t "caller-supplied regexes retain their compile options" (fun () ->
+          let make options =
+            let re = Pcre2_.compile_exn ~options "token" in
+            Prefiltering.File.of_formula (F.pred (P.Regex re))
+          in
+          let sensitive = make [] in
+          let caseless = make [ `CASELESS ] in
+          let results =
+            Prefiltering.File.check_many [ sensitive; caseless ] "TOKEN"
+          in
+          Alcotest.(check (list bool))
+            "different results" [ false; true ] results);
+    ]
+
 (*****************************************************************************)
 (* Prefilter conjunct ranking tests *)
 (*****************************************************************************)
@@ -773,6 +823,7 @@ let tainting_test (lang : Lang.t) (rules_file : Fpath.t) (file : Fpath.t) =
   let matches =
     taint_rules
     |> List.concat_map (fun rule ->
+        let lazy_content = lazy_safe (UFile.read_file file) in
         let xtarget : Xtarget.t =
           {
             path =
@@ -781,7 +832,8 @@ let tainting_test (lang : Lang.t) (rules_file : Fpath.t) (file : Fpath.t) =
                 internal_path_to_content = file;
               };
             analyzer = Analyzer.L (lang, []);
-            lazy_content = lazy_safe (UFile.read_file file);
+            lazy_content;
+            lazy_utf8_valid = Lazy_safe.map String.is_valid_utf_8 lazy_content;
             lazy_ast_and_errors = lazy_safe (ast, []);
           }
         in
@@ -950,7 +1002,15 @@ let full_rule_taint_maturity_tests =
  *)
 let semgrep_rules_repo_tests : Testo.t list =
   let path = tests_path / "semgrep-rules" in
-  let tests = Test_engine.make_tests [ path ] in
+  let expectations_file = tests_path / "rule-expectations.json" in
+  let expectations =
+    if Sys_.file_exists (Fpath.to_string expectations_file) then
+      match Test_expectations.load expectations_file with
+      | Ok expectations -> expectations
+      | Error (`Msg message) -> failwith message
+    else Test_expectations.empty
+  in
+  let tests = Test_engine.make_tests ~expectations [ path ] in
   let groups =
     tests
     |> List.filter_map (fun (test : Testo.t) ->
@@ -1032,6 +1092,80 @@ let semgrep_rules_repo_tests : Testo.t list =
 (* All tests *)
 (*****************************************************************************)
 
+let external_expectations_tests =
+  let run ~source ~engine ~path ~lines ~passes () =
+    let module F = Testutil_files in
+    let rules =
+      {|rules:
+  - id: first
+    languages: [python]
+    message: first
+    severity: WARNING
+    pattern: danger(...)
+  - id: second
+    languages: [python]
+    message: second
+    severity: WARNING
+    pattern: sink(...)
+|}
+    in
+    let overrides =
+      Printf.sprintf {|[{"path":%S,"rule_id":"first","engine":%S,"lines":%s}]|}
+        path engine lines
+    in
+    F.with_tempfiles ~chdir:true
+      [
+        F.Dir
+          ("rules", [ F.File ("test.yaml", rules); F.File ("test.py", source) ]);
+        F.Dir ("expectations", [ F.File ("overrides.json", overrides) ]);
+      ]
+      (fun _ ->
+        let expectations =
+          match
+            Test_expectations.load (Fpath.v "expectations/overrides.json")
+          with
+          | Ok expectations -> expectations
+          | Error (`Msg message) -> failwith message
+        in
+        let tests =
+          Test_engine.make_tests ~expectations
+            ~fail_callback:(fun _ message -> failwith message)
+            [ Fpath.v "rules" ]
+        in
+        let passed =
+          try
+            List.iter (fun (test : Testo.t) -> test.func ()) tests;
+            true
+          with
+          | Failure _ -> false
+        in
+        Alcotest.(check bool) "rule expectations" passes passed)
+  in
+  let baseline = "# ruleid: first\ndanger()\n# ruleid: second\nsink()\n" in
+  let changed =
+    "# ruleid: first\nsafe()\ndanger()\n# ruleid: second\nsink()\n"
+  in
+  let removed = "# ruleid: first\nsafe()\n# ruleid: second\nsink()\n" in
+  let test name ?(source = changed) ?(engine = "OSS")
+      ?(path = "../rules/test.py") ~lines ~passes () =
+    t name (run ~source ~engine ~path ~lines ~passes)
+  in
+  Testo.categorize "external rule expectations"
+    [
+      test "changed findings" ~lines:"[3]" ~passes:true ();
+      test "removed findings" ~source:removed ~lines:"[]" ~passes:true ();
+      test "wrong findings fail" ~lines:"[2]" ~passes:false ();
+      test "rule IDs remain isolated"
+        ~source:"# ruleid: second\ndanger(sink())\n" ~lines:"[]" ~passes:false
+        ();
+      test "other rules still fail" ~source:"# ruleid: second\nsafe()\n"
+        ~lines:"[]" ~passes:false ();
+      test "engines remain isolated" ~source:baseline ~engine:"Pro" ~lines:"[]"
+        ~passes:true ();
+      test "targets remain isolated" ~source:baseline ~path:"../rules/other.py"
+        ~lines:"[]" ~passes:true ();
+    ]
+
 let tests =
   List_.flatten
     [
@@ -1041,10 +1175,13 @@ let tests =
       eval_regression_tests ();
       filter_irrelevant_rules_tests;
       regexp_prefilter_tests;
+      utf8_regex_prefilter_tests;
+      file_prefilter_memo_tests;
       prefilter_ranking_tests;
       lang_tainting_tests ();
       maturity_tests ();
       full_rule_taint_maturity_tests;
       full_rule_regression_tests;
       semgrep_rules_repo_tests;
+      external_expectations_tests;
     ]
