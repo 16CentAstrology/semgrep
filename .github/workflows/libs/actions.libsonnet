@@ -17,10 +17,10 @@ local download_artifact_step(artifact_name, run_id=null, path=null) = {
 // of a PR
 local
   // `event` (optional): restrict to runs triggered by this event (e.g. 'push').
-  // A commit on a release-* branch has both a push run (which builds the
-  // release artifacts, e.g. the osx-x86 wheel) and a pull_request run (which
-  // skips them), so callers that need the build artifacts must pass
-  // event='push' or they may resolve the pull_request run and not find them.
+  // A commit on a release-* branch has both a push run (which runs the
+  // release-only jobs) and a pull_request run (which may skip them), so callers
+  // that need the build artifacts must pass event='push' or they may resolve
+  // the pull_request run and not find them.
   get_workflow_run_id_step(
     sha,
     workflow_file,
@@ -191,7 +191,7 @@ local merge_base_output = '${{ steps.get-merge-base.outputs.commit }}';
 
   // We also pin uv version in the Dockerfile. So, if you are updating
   // the version here, update it there too.
-  default_uv_version: '0.10.9',
+  default_uv_version: '0.13.4',
   setup_python_step: function(version='3.11', cache='auto') {
     uses: uses.astral_sh.setup_uv,
     with: {
@@ -205,46 +205,6 @@ local merge_base_output = '${{ steps.get-merge-base.outputs.commit }}';
     'working-directory': directory,
     run: (if group != '' then 'uv sync --locked --group %s' % group else 'uv sync --locked'),
   },
-
-  // ---------------------------------------------------------
-  // Docker
-  // ---------------------------------------------------------
-
-  // alt: run: docker-login -u USER -p PASS
-  // alt: run a .github/docker-login
-  docker_login_step: {
-    uses: uses.docker.login_action,
-    with: {
-      username: '${{ secrets.DOCKER_USERNAME }}',
-      password: '${{ secrets.DOCKER_PASSWORD }}',
-    },
-  },
-  ecr_login_steps: [
-    // The configure-aws-credentials and login-ecr steps are needed so
-    // we can push to Amazon ECR successfully.
-    {
-      id: 'configure-aws-credentials',
-      name: 'Configure AWS credentials',
-      uses: uses.aws_actions.configure_aws_credentials,
-      // The aws role we use to push to ecr is different than the role in
-      // semgrep_pro.libsonnet because it's used for a different purpose.
-
-      // Here the role is used to access ECR, while in semgrep_pro.libjsonnet
-      // the role is used to upload pro binary buckets to a specific S3
-      // location.
-      with: {
-        'role-to-assume': 'arn:aws:iam::338683922796:role/semgrep-semgrep-proprietary-deploy-role',
-        'role-duration-seconds': 900,
-        'role-session-name': 'semgrep-proprietary-build-test-docker-gha',
-        'aws-region': 'us-west-2',
-      },
-    },
-    {
-      id: 'login-ecr',
-      name: 'Login to Amazon ECR',
-      uses: uses.aws_actions.amazon_ecr_login,
-    },
-  ],
 
   // ---------------------------------------------------------
   // Artifact management

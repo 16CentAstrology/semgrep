@@ -12,7 +12,7 @@ jobs:
         with:
           enable-cache: auto
           python-version: "3.10"
-          version: 0.10.9
+          version: 0.13.4
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           name: semgrep-core-x86-artifact
@@ -40,8 +40,6 @@ jobs:
     uses: ./.github/workflows/build-test-docker.yml
   build-test-osx-arm64:
     uses: ./.github/workflows/build-test-osx-arm64.yml
-  build-test-osx-x86:
-    uses: ./.github/workflows/build-test-osx-x86.yml
   test-cli:
     name: test semgrep-cli
     needs:
@@ -59,7 +57,7 @@ jobs:
         with:
           enable-cache: auto
           python-version: ${{ matrix.python }}
-          version: 0.10.9
+          version: 0.13.4
       - name: Install Python dependencies
         run: uv sync --locked
         working-directory: cli
@@ -159,11 +157,11 @@ jobs:
           GIT_CONFIG_VALUE_0: "false"
         uses: semgrep/setup-ocaml@a739c5405d73c42ef15a9dc995efc0f87396cc36
         with:
-          cache-prefix: v7-semgrep-${{ hashFiles('opam-lockfiles/*.locked', '*.opam', 'dev/required.opam', 'libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam', 'OSS/opam-lockfiles/*.locked', 'OSS/*.opam', 'OSS/dev/required.opam', 'OSS/libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'OSS/cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam') }}
+          cache-prefix: v8-semgrep-${{ hashFiles('opam-lockfiles/*.locked', '*.opam', 'dev/required.opam', 'libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam', 'OSS/opam-lockfiles/*.locked', 'OSS/*.opam', 'OSS/dev/required.opam', 'OSS/libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'OSS/cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam') }}
           ocaml-compiler: ocaml-variants.5.4.0+options,ocaml-option-flambda
           opam-pin: false
           opam-repositories: |
-            default: https://github.com/ocaml/opam-repository.git#78d29aba187e8362b8ab86c189790c0af9153d4b
+            default: https://github.com/ocaml/opam-repository.git#922f67e068446a8d8e809a40251a259bd0549552
           save-opam-post-run: true
       - name: Build semgrep-core
         run: |
@@ -178,7 +176,7 @@ jobs:
         with:
           enable-cache: auto
           python-version: "3.11"
-          version: 0.10.9
+          version: 0.13.4
       - name: Run pytest for osemgrep known passing tests
         run: |
           git config --global --add safe.directory "$(pwd)"
@@ -197,7 +195,7 @@ jobs:
         with:
           enable-cache: auto
           python-version: "3.12"
-          version: 0.10.9
+          version: 0.13.4
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           name: semgrep-core-x86-artifact
@@ -258,11 +256,11 @@ jobs:
           GIT_CONFIG_VALUE_0: "false"
         uses: semgrep/setup-ocaml@a739c5405d73c42ef15a9dc995efc0f87396cc36
         with:
-          cache-prefix: v7-semgrep-${{ hashFiles('opam-lockfiles/*.locked', '*.opam', 'dev/required.opam', 'libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam', 'OSS/opam-lockfiles/*.locked', 'OSS/*.opam', 'OSS/dev/required.opam', 'OSS/libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'OSS/cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam') }}
+          cache-prefix: v8-semgrep-${{ hashFiles('opam-lockfiles/*.locked', '*.opam', 'dev/required.opam', 'libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam', 'OSS/opam-lockfiles/*.locked', 'OSS/*.opam', 'OSS/dev/required.opam', 'OSS/libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'OSS/cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam') }}
           ocaml-compiler: ocaml-variants.5.4.0+options,ocaml-option-flambda
           opam-pin: false
           opam-repositories: |
-            default: https://github.com/ocaml/opam-repository.git#78d29aba187e8362b8ab86c189790c0af9153d4b
+            default: https://github.com/ocaml/opam-repository.git#922f67e068446a8d8e809a40251a259bd0549552
           save-opam-post-run: true
       - name: Install dependencies
         run: opam exec -- make install-deps

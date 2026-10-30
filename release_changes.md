@@ -1,40 +1,39 @@
-## [1.177.0](https://github.com/semgrep/semgrep/releases/tag/v1.177.0) - 2026-09-10
+## [1.182.0](https://github.com/semgrep/semgrep/releases/tag/v1.182.0) - 2026-10-20
 
 ### ### Added
 
-- Added native Supply Chain support for Bazel workspaces using `rules_jvm_external`. Semgrep now recognizes a `maven_install.json` pinned lockfile (versions `0.1.0` and `3`, as emitted by rules_jvm_external 3.x through current) paired with a `MODULE.bazel` (or legacy `WORKSPACE` / `WORKSPACE.bazel`) marker as a Maven-ecosystem subproject, and attributes findings to the workspace root rather than the lockfile's directory. Workspace-declared root artifacts are identified via `__INPUT_ARTIFACTS_HASH` for accurate direct-vs-transitive classification; dependencies are emitted with `Unknown` transitivity when that field is not available. This is the first milestone of native Bazel coverage; broader ecosystem support (`rules_python`, `rules_go`, `rules_js`) and Bazel-aware reachability attribution follow. (SC-2008)
-- Several performance improvements for regex-only rules where the underlying
-  regex are inefficient to run on our default regex engine (currently PCRE2). For
-  example, a rule matching `FOOBAR(a+)\1` will skip any file that does not
-  contain `FOOBAR` without running the regex. (scrt-979)
+- Added Objective-C language support (`objc`, alpha): tree-sitter based parsing of `.m` files with semgrep pattern syntax (metavariables, ellipsis in argument/statement/message-keyword positions, deep ellipsis), enabling search-mode and taint-mode rules on Objective-C code. Message sends, blocks, control flow, class/method definitions, and Objective-C literals are modeled; remaining constructs parse and degrade gracefully. Objective-C++ (`.mm`) support will follow separately. (gh-9265)
 
 ### ### Changed
 
-- Prefilter conditions now evaluate their cheap string predicates before their
-  expensive regex predicates. Since evaluation short-circuits, a file that a
-  string check already rules in or out no longer pays for regex predicates
-  (which is what a pattern's prefilter falls back to when no literal substring
-  can be extracted from it, and which can be slow on files with very long
-  lines). (prefilter-rank-conjuncts)
-- Supply Chain scans can report dependencies from their Gradle module build files instead of the root manifest. This behavior is disabled by default during rollout and can be tested with `--x-gradle-module-attribution`. Enabling it can change finding IDs because finding paths change; the ID calculation is unchanged. (SC-2560)
+- c-sharp-pro grammar update (v0.23.1):
+
+  - C# (Pro) parsing and rule patterns now support Unicode escape sequences in identifiers (e.g. x\u0062), and matching follows C# identifier equality: `@class`, `cl\u0061ss`, and `class` (or `a\u200Cb` and `ab`) are the same name.
+  - C# (Pro) now parses identifiers using Unicode XID characters such as `℘` (U+2118) and `·` (U+00B7), and still accepts formatting characters (e.g. soft hyphen) inside identifiers.
+
+  (c-sharp-pro-v0.23.1)
+- hcl grammar update (v1.2.0):
+
+  - Terraform target parsing now supports namespaced function calls such as provider::local::fn(...).
+  - Terraform parsing now represents conditional and loop template directives with their conditions, binders, and bodies.
+  - Terraform parsing now binds attribute and index traversal more tightly than unary operators.
+
+  (hcl-v1.2.0)
+- lua grammar update (v0.5.0):
+
+  - Lua parsing now supports Lua 5.4 variable attributes and Lua 5.5 leading attributes, global declarations, and named vararg parameters.
+  - Lua parsing now accepts Unicode identifiers, hashbang lines, and additional numeric forms including LuaJIT binary, LL/ULL, and imaginary literals.
+  - Lua AST conversion now preserves elseif branches in source order, including when an else branch is present, and correctly retains member-assignment receivers and colon-method declaration names.
+  - Lua string ASTs now separate single-quoted and long-bracket delimiters from their content, consistently with double-quoted strings. Escape contents remain uninterpreted.
+  - Lua parsing now handles builtin names such as next as ordinary callable identifiers.
+
+  (lua-v0.5.0)
 
 ### ### Fixed
 
-- Speed up `semgrep ci` filtering when a deployment has many triage-ignored findings. (triage-ignored-performance)
-- Semgrep no longer crashes with an OCaml stack trace when a proxy environment
-  variable holds an unusable value. `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`
-  set to an empty value is now ignored with a warning, and the scan
-  proceeds without a proxy. A non-empty value that is not a usable proxy URL
-  now exits with an error message, with any credentials in the URL
-  redacted, instead of failing inside the HTTP client.
-
-  Semgrep also now adds the missing scheme to a proxy URL supplied
-  without one; `https` for `HTTPS_PROXY and `http` otherwise. (ENGINE-2208)
-- Supply Chain: lockfileless Gradle scans now report a "Resource Inaccessible"
-  resolution error when a repository refuses a request (for example a 401 from a
-  private registry), instead of exiting successfully with a silently incomplete
-  dependency list. (sc-3358)
+- Fix C++ range-based for loops with structured bindings so they parse and preserve findings in the rest of the file. (CODE-10028)
+- Python only: a `requirements.txt` line declared as a version range or bare name is now reported as a direct dependency even when a `requirements.in` manifest is present. Such a line can only have been written by hand, since `pip-compile` emits exact pins, so it is a direct declaration regardless of whether the manifest names the package. Exact pins keep using the manifest to decide between direct and transitive. (SC-4242)
 
 ### ### Infra/Release Changes
 
-- Improves shutdown time during scans with --trace. (otel-shutdown-flush)
+- Update the bundled Tree-sitter Elixir grammar to v0.3.5 and regenerate its parser with Tree-sitter 0.26.3; no language syntax changes. (elixir-v0.3.5)

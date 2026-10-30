@@ -259,7 +259,6 @@ let langs_with_error_tolerance =
     (Lang.Csharp, Strict);
     (Lang.Dockerfile, Strict);
     (Lang.Lua, Strict);
-    (Lang.Lua, Todo);
     (Lang.Move_on_aptos, Strict);
     (Lang.Circom, Strict);
     (Lang.Rust, Strict);
@@ -275,6 +274,7 @@ let langs_with_error_tolerance =
     (Lang.Jsonnet, Strict);
     (Lang.Dart, Strict);
     (Lang.Fga, Strict);
+    (Lang.Objc, Strict);
     (* here we have both a Pfff and tree-sitter parser *)
     (Lang.Java, Strict);
     (Lang.Go, Strict);

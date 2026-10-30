@@ -1,5 +1,4 @@
 // This workflow builds and tests the semgrep-core binary for macOS arm64
-// coupling: if you modify this file, modify also build-test-osx-x86.jsonnet
 
 local actions = import 'libs/actions.libsonnet';
 local gha = import 'libs/gha.libsonnet';
@@ -14,13 +13,14 @@ local runs_on = 'macos-15-xlarge';
 // The jobs
 // ----------------------------------------------------------------------------
 
-// alt: we could factorize more with build-test-osx-x86.jsonnet by making
-// the xxx_job functions, but let's copy paste a bit for now.
 local artifact_name = 'semgrep-osx-arm64-${{ github.sha }}';
 
 local build_core_job = {
   'runs-on': runs_on,
   steps: actions.checkout_with_submodules() +
+         // Workaround for brew lock conflict on openssl@3 during opam depext installs.
+         // https://linear.app/semgrep/issue/CODE-10023
+         [semgrep.brew_unlink_openssl_step] +
          semgrep.build_test_steps() +
          [
            actions.upload_artifact_step(artifact_name, './bin/semgrep-core'),

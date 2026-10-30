@@ -128,7 +128,8 @@ let group_relevant_rules rules (xconf : Match_env.xconfig) (xtarget : Xtarget.t)
           let prefilter_results =
             Tracing.with_span ~level:Tracing.Debug "prefilter.file.evaluation"
               ~__FILE__ ~__LINE__ (fun _span ->
-                Prefiltering.File.check_many prefilters
+                Prefiltering.File.check_many ~utf8_valid:xtarget.lazy_utf8_valid
+                  prefilters
                   (Lazy_safe.force xtarget.lazy_content))
           in
           let rule_results = List_.combine_exn rules prefilter_results in
@@ -359,6 +360,9 @@ let check ~matches_hook ~(timeout : timeout_config option)
   in
   {
     res with
-    quick_profiling = Some profiling;
+    (* Combine rather than replace, so that per-rule stats (e.g. match times)
+       recorded in the rule results are preserved. *)
+    quick_profiling =
+      Core_quick_profiling.combine_opt res.quick_profiling (Some profiling);
     errors = res.errors |> E.ErrorSet.union errors;
   }

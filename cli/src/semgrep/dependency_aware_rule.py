@@ -35,7 +35,9 @@ from semdep.external.packaging.specifiers import InvalidSpecifier  # type: ignor
 from semdep.external.packaging.specifiers import SpecifierSet  # type: ignore
 from semdep.matchers.gradle import GradleMatcher
 from semdep.package_restrictions import dependencies_range_match_any
+from semdep.package_restrictions import dependency_match_key
 from semdep.package_restrictions import is_in_range
+from semdep.package_restrictions import is_unpinned_version
 from semgrep.dependency_path import DependencyParentIndex
 from semgrep.error import SemgrepError
 from semgrep.rpc import RpcSession
@@ -276,7 +278,9 @@ class SubprojectDependencyIndex:
         deps = list(iter_found_dependencies(subproject.resolved_dependencies))
         subproject_index: dict[str, list[out.FoundDependency]] = defaultdict(list)
         for dependency in deps:
-            subproject_index[dependency.package].append(dependency)
+            subproject_index[
+                dependency_match_key(dependency.ecosystem, dependency.package)
+            ].append(dependency)
 
         return cls(
             subproject_index,
@@ -294,11 +298,13 @@ class SubprojectDependencyIndex:
         Yields matches to the given sca patterns using the index to compute them.
         """
         for pattern in sca_patterns:
-            candidates = self.index.get(pattern.package, [])
+            key = dependency_match_key(pattern.ecosystem, pattern.package)
+            candidates = self.index.get(key, [])
             for candidate in candidates:
                 if (
                     pattern.ecosystem == candidate.ecosystem
-                    and pattern.package == candidate.package
+                    and dependency_match_key(candidate.ecosystem, candidate.package)
+                    == key
                     and is_in_range(
                         pattern.ecosystem, pattern.semver_range, candidate.version
                     )
@@ -575,19 +581,39 @@ def generate_reachable_sca_findings(
                         break
 
                 pattern_deps = set(
-                    dep_pattern.package for dep_pattern in depends_on_entries
+                    dependency_match_key(dep_pattern.ecosystem, dep_pattern.package)
+                    for dep_pattern in depends_on_entries
                 )
 
-                # This list will be non-empty if any of the dependencies the rule searches for are present as direct dependencies
+                # The packages the rule searches for that are present as direct
+                # dependencies, whatever their version. Presence alone is the
+                # signal for the heuristic below: a direct `foo` means the code
+                # most likely uses `foo`, not a transitive `foo-special`.
                 # It only looks at the same dependencies the matches came from,
                 # so with Gradle module attribution a direct copy in another
                 # module does not suppress this module's transitive copy.
-                rule_could_match_direct_deps = [
-                    found_dep.package
+                direct_pattern_packages = {
+                    dependency_match_key(found_dep.ecosystem, found_dep.package)
                     for found_dep in deps
-                    if found_dep.package in pattern_deps
+                    if dependency_match_key(found_dep.ecosystem, found_dep.package)
+                    in pattern_deps
                     and found_dep.transitivity.value == out.Direct()
-                ]
+                }
+                # The subset whose direct copy names a definitive installed
+                # version. A direct dependency with no pinned version (see
+                # is_unpinned_version) cannot itself be what the rule matched,
+                # so it must not suppress a match on a pinned transitive copy
+                # of the same package. Otherwise adding `foo>=2.0` to
+                # requirements.txt would hide a reachable finding on a
+                # vulnerable transitive `foo` that was reported before.
+                pinned_direct_pattern_packages = {
+                    dependency_match_key(found_dep.ecosystem, found_dep.package)
+                    for found_dep in deps
+                    if dependency_match_key(found_dep.ecosystem, found_dep.package)
+                    in pattern_deps
+                    and found_dep.transitivity.value == out.Direct()
+                    and not is_unpinned_version(found_dep.version)
+                }
 
                 for dep_pat, found_dep in dependency_matches:
                     if found_dep.lockfile_path is None:
@@ -629,9 +655,18 @@ def generate_reachable_sca_findings(
                     # In the case where our dependency match is on a transitive, but one of the dependencies the rule searches for is
                     # present as a direct dependency, we skip this dependency match.
                     # This does not handle the case `foo` and `foo-special` are both direct dependencies
-                    if (
-                        found_dep.transitivity.value == out.Transitive()
-                        and rule_could_match_direct_deps
+                    # A direct copy of the matched package itself only counts
+                    # when it is pinned; a direct copy of any other package the
+                    # rule searches for counts whatever its version.
+                    found_key = dependency_match_key(
+                        found_dep.ecosystem, found_dep.package
+                    )
+                    other_direct_pattern_packages = direct_pattern_packages - {
+                        found_key
+                    }
+                    if found_dep.transitivity.value == out.Transitive() and (
+                        found_key in pinned_direct_pattern_packages
+                        or other_direct_pattern_packages
                     ):
                         continue
 

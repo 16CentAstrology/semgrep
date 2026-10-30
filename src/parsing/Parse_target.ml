@@ -80,7 +80,7 @@ let just_parse_with_lang lang file : Parsing_result2.t =
         tolerated_errors = [];
         stat = Parsing_stat.default_stat !!file;
       }
-  (* Menhir and Tree-sitter *)
+  (* Tree-sitter for C and C++ targets; Menhir is used for patterns. *)
   | Lang.C
   | Lang.Cpp ->
       run file [ TreeSitter Parse_cpp_tree_sitter.parse ] Cpp_to_generic.program
@@ -161,8 +161,6 @@ let just_parse_with_lang lang file : Parsing_result2.t =
       run file
         [ TreeSitter Parse_jsonnet_tree_sitter.parse ]
         Jsonnet_to_generic.program
-  | Lang.Ql ->
-      run file [ TreeSitter Parse_ql_tree_sitter.parse ] QL_to_generic.program
   | Lang.Terraform ->
       run file
         [ TreeSitter Parse_terraform_tree_sitter.parse ]
@@ -213,6 +211,8 @@ let just_parse_with_lang lang file : Parsing_result2.t =
       run file [ TreeSitter Parse_solidity_tree_sitter.parse ] (fun x -> x)
   | Lang.Swift ->
       run file [ TreeSitter Parse_swift_tree_sitter.parse ] (fun x -> x)
+  | Lang.Objc ->
+      run file [ TreeSitter Parse_objc_tree_sitter.parse ] (fun x -> x)
   | Lang.R -> run file [ TreeSitter Parse_r_tree_sitter.parse ] (fun x -> x)
   | Lang.Move_on_sui ->
       run file [ TreeSitter Parse_move_on_sui_tree_sitter.parse ] (fun x -> x)
