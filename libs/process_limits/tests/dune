@@ -6,8 +6,6 @@
    process_limits
    commons
    alcotest
-   eio_main
-   unix
  )
  (preprocess (pps ppx_deriving.show))
 )

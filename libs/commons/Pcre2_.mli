@@ -25,12 +25,7 @@
    Note that the default 'equal' function is based only on the source
    patterns and doesn't take into account compilation options.
 *)
-type t = private {
-  pattern : string;
-  regex : Pcre2.Interp.t;
-  jit : Pcre2.Jit.t option;
-      (** Initialized before the regexp is shared with matching domains. *)
-}
+type t = private { pattern : string; regex : Pcre2.Interp.t }
 [@@deriving show, eq, hash, ord, sexp_of]
 
 type match_ = Pcre2.match_ [@@deriving show]
@@ -56,8 +51,7 @@ val compile :
   (t, Pcre2.compile_error) Result.t
 (** [compile ?options pattern] compiles [pattern] with [`UTF],
     [`MATCH_LIMIT match_limit], and [`DEPTH_LIMIT depth_limit], in addition to
-    [options]. It also compiles an independent JIT pattern with the same options
-    before returning, when JIT is available. *)
+    [options]. *)
 
 val compile_exn : ?options:Pcre2.Interp.compile_option list -> string -> t
 (** Like {!compile}, but raises [Invalid_argument] with a message containing
@@ -88,14 +82,6 @@ val quote : string -> string
 val matching_exact_string : string -> t
 (** [matching_exact_string str] matches [str] literally. *)
 
-val matching_exact_string_bytes :
-  case_sensitive:bool -> string -> (t, Pcre2.compile_error) Result.t
-(** Compile a literal byte substring search, without UTF mode. This is for
-    file prefilters that must also work on invalid UTF-8 content. With
-    [case_sensitive = false], PCRE2 may accept additional byte pairs compared
-    with Base's caseless byte comparison, so use it only for conservative
-    filters. *)
-
 val matching_exact_word : string -> t
 (** [matching_exact_word str] matches [str] literally between word
     boundaries. *)
@@ -111,10 +97,6 @@ val is_match :
   string ->
   (bool, Pcre2.match_error) Result.t
 (** [is_match rex subject] is whether [rex] matches anywhere in [subject]. *)
-
-val is_match_valid_utf8 : t -> string -> (bool, Pcre2.match_error) Result.t
-(** Like [is_match], using JIT when available. The caller must establish that
-    the entire subject is valid UTF-8 before calling this function. *)
 
 val unanchored_match : t -> string -> (bool, Pcre2.match_error) Result.t
 (** [unanchored_match rex subject] is an alias for {!is_match} that emphasizes
@@ -157,11 +139,6 @@ val captures_iter :
   (captures, Pcre2.match_error) Result.t Seq.t
 (** [captures_iter rex subject] is like {!find_iter} but yields the capture
     groups of each match. *)
-
-val captures_iter_valid_utf8 :
-  t -> string -> (captures, Pcre2.match_error) Result.t Seq.t
-(** Like [captures_iter], using JIT when available. The caller must establish
-    that the entire subject is valid UTF-8 before calling this function. *)
 
 (*****************************************************************************)
 (* Splitting and replacement *)

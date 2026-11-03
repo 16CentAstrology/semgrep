@@ -207,8 +207,6 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                             };
                           lazy_ast_and_errors = lazy_safe (mast', []);
                           lazy_content = lazy_safe contents;
-                          lazy_utf8_valid =
-                            lazy_safe (String.is_valid_utf_8 contents);
                         }
                       in
                       (* Persist the bindings from inside the `metavariable-pattern`
@@ -325,8 +323,6 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                               analyzer;
                               lazy_ast_and_errors;
                               lazy_content = lazy_safe contents;
-                              lazy_utf8_valid =
-                                lazy_safe (String.is_valid_utf_8 contents);
                             }
                           in
                           (* Persist the bindings from inside the `metavariable-pattern`
