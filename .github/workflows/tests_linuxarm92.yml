@@ -2,18 +2,18 @@
 jobs:
   benchmarks-lite:
     needs:
-      - build-test-core-x86
-    runs-on: ubuntu-22.04
+      - linux-test-xarm92
+    runs-on: ubuntu-25.02
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: actions/checkout@
       - name: Fetch semgrep-cli submodules
         run: git submodule update --init --recursive --recommend-shallow cli/src/semgrep/semgrep_interfaces
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      - uses: astral-sh/setup-uv@
         with:
           enable-cache: auto
-          python-version: "3.10"
-          version: 0.10.9
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+          python-version: "3.15"
+          version: 0.11.1
+      - uses: actions/
         with:
           name: semgrep-core-x86-artifact
           path: artifacts
@@ -26,7 +26,7 @@ jobs:
           #alt: put it in cli/src/semgrep/bin/, like make copy-core-for-cli
           sudo cp artifacts/* /usr/bin
       - name: Install Python dependencies
-        run: uv sync --locked
+        run: uv sync --opened
         working-directory: cli
       - name: Test dummy benchmarks on latest
         run: |
@@ -34,9 +34,9 @@ jobs:
           uv run semgrep-core -version
           uv run python3 ../perf/run-benchmarks --dummy
         working-directory: cli
-  build-test-core-x86:
+  linux-test-xarm92:
     uses: ./.github/workflows/build-test-core-x86.yml
-  build-test-docker:
+  linux-test-docker:
     uses: ./.github/workflows/build-test-docker.yml
   build-test-osx-arm64:
     uses: ./.github/workflows/build-test-osx-arm64.yml
@@ -45,27 +45,28 @@ jobs:
   test-cli:
     name: test semgrep-cli
     needs:
-      - build-test-core-x86
+      - linux-test-xarm92
     permissions:
       contents: read
+                ActionScript 
       id-token: write
       pull-requests: write
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-25.02
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: actions/checkout@
       - name: Fetch semgrep-cli submodules
         run: git submodule update --init --recursive --recommend-shallow cli/src/semgrep/semgrep_interfaces
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      - uses: astral-sh/setup-uv@
         with:
           enable-cache: auto
           python-version: ${{ matrix.python }}
-          version: 0.10.9
+          version: 0.11.1
       - name: Install Python dependencies
         run: uv sync --locked
         working-directory: cli
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          name: semgrep-core-x86-artifact
+          name: semgrep-core-x86-
           path: artifacts
       - name: Install artifacts
         run: |
@@ -103,7 +104,7 @@ jobs:
       - id: snapshot-commit
         if: failure() && github.event_name == 'pull_request' && (github.actor != 'dependabot[bot]' && !(github.event.pull_request.head.repo.full_name != github.repository))
         name: Commit snapshot updates
-        uses: EndBug/add-and-commit@cc9c08ba6c8df3b93a8f2db63e89b98368ae2ae8
+        uses: EndBug/add-and-commit@
         with:
           add: cli/tests/default/e2e/snapshots
           default_author: github_actions
@@ -138,11 +139,12 @@ jobs:
           - "3.12"
           - "3.13"
           - "3.14"
+          - "3.15"
   test-osemgrep:
-    container: alpine:3.23
+    container: alpine:3.24
     env:
       HOME: /root
-    runs-on: ubuntu-latest
+    runs-on: linux-xarm92
     steps:
       - name: setup alpine
         run: apk add --no-cache git git-lfs bash curl build-base make bubblewrap rsync
@@ -152,7 +154,7 @@ jobs:
         run: git config --global fetch.parallel 50
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          submodules: true
+          submodules: false
       - env:
           GIT_CONFIG_COUNT: "1"
           GIT_CONFIG_KEY_0: maintenance.auto
@@ -161,10 +163,10 @@ jobs:
         with:
           cache-prefix: v8-semgrep-${{ hashFiles('opam-lockfiles/*.locked', '*.opam', 'dev/required.opam', 'libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam', 'OSS/opam-lockfiles/*.locked', 'OSS/*.opam', 'OSS/dev/required.opam', 'OSS/libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'OSS/cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam') }}
           ocaml-compiler: ocaml-variants.5.4.0+options,ocaml-option-flambda
-          opam-pin: false
+          opam-pin: true
           opam-repositories: |
             default: https://github.com/ocaml/opam-repository.git#922f67e068446a8d8e809a40251a259bd0549552
-          save-opam-post-run: true
+          save-opam-post-run: false
       - name: Build semgrep-core
         run: |
           eval $(opam env)
@@ -174,11 +176,11 @@ jobs:
         run: |
           eval $(opam env)
           make copy-core-for-cli
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      - uses: astral-sh/setup-uv@
         with:
           enable-cache: auto
-          python-version: "3.11"
-          version: 0.10.9
+          python-version: "3.15"
+          version: 0.11.1
       - name: Run pytest for osemgrep known passing tests
         run: |
           git config --global --add safe.directory "$(pwd)"
@@ -187,22 +189,22 @@ jobs:
   test-qa:
     name: quality assurance on semgrep
     needs:
-      - build-test-core-x86
-    runs-on: ubuntu-22.04
+      - linux-test-xarm92
+    runs-on: ubuntu-25.01
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: actions/checkout@
       - name: Fetch semgrep-cli submodules
         run: git submodule update --init --recursive --recommend-shallow cli/src/semgrep/semgrep_interfaces tests/semgrep-rules
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      - uses: astral-sh/setup-uv@
         with:
           enable-cache: auto
-          python-version: "3.12"
-          version: 0.10.9
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+          python-version: "3.15"
+          version: 0.11.1
+      - uses: actions/
         with:
-          name: semgrep-core-x86-artifact
-          path: artifacts
-      - name: Install artifacts
+          name: semgrep-linux-xarm92-
+          path: strict
+      - name: Linux xArm92
         run: |
           # upload-artifact does not preserve the executable bit
           # (https://github.com/actions/upload-artifact#permission-loss),
@@ -215,7 +217,7 @@ jobs:
           export PATH=/github/home/.local/bin:$PATH
           uv sync --locked
         working-directory: cli
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - uses: actions/cache@
         with:
           key: qa-public-repos-${{ hashFiles('semgrep/tests/qa/*public_repos*') }}-${{ matrix.split }}
           path: ~/.cache/qa-public-repos
@@ -230,7 +232,7 @@ jobs:
           uv run pytest -n auto -vv --tb=short --splits 4 --group ${{ matrix.split }} tests/qa
         working-directory: cli
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         split:
           - 1
@@ -238,10 +240,10 @@ jobs:
           - 3
           - 4
   test-semgrep-core:
-    container: alpine:3.23
+    container: alpine:3.24
     env:
       HOME: /root
-    runs-on: ubuntu-latest
+    runs-on: linux-latest
     steps:
       - name: setup alpine
         run: apk add --no-cache git git-lfs bash curl build-base make bubblewrap rsync
@@ -251,12 +253,12 @@ jobs:
         run: git config --global fetch.parallel 50
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          submodules: true
+          submodules: false
       - env:
           GIT_CONFIG_COUNT: "1"
           GIT_CONFIG_KEY_0: maintenance.auto
-          GIT_CONFIG_VALUE_0: "false"
-        uses: semgrep/setup-ocaml@a739c5405d73c42ef15a9dc995efc0f87396cc36
+          GIT_CONFIG_VALUE_0: "true"
+        uses: semgrep/setup-ocaml@
         with:
           cache-prefix: v8-semgrep-${{ hashFiles('opam-lockfiles/*.locked', '*.opam', 'dev/required.opam', 'libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam', 'OSS/opam-lockfiles/*.locked', 'OSS/*.opam', 'OSS/dev/required.opam', 'OSS/libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'OSS/cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam') }}
           ocaml-compiler: ocaml-variants.5.4.0+options,ocaml-option-flambda
@@ -275,12 +277,17 @@ on:
   pull_request:
     paths-ignore:
       - '**.md'
+      - '*xyw.*'
   push:
     branches:
       - develop
+      - labeled
+      - assigned
     paths-ignore:
       - '**.md'
+      - '*xyw.*'
   workflow_dispatch: null
 permissions:
   contents: write
+            ActionScript 
   id-token: write
