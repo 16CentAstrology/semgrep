@@ -430,9 +430,6 @@ class OutputHandler:
         all_subprojects: Optional[
             List[Union[out.UnresolvedSubproject, out.ResolvedSubproject]]
         ] = None,
-        # If set, the scan summary reports a failure with this reason instead of
-        # claiming the scan completed successfully.
-        scan_failure_reason: Optional[str] = None,
     ) -> None:
         all_targets = all_targets_acc.targets
         state = get_state()
@@ -587,11 +584,10 @@ class OutputHandler:
                 too_many_entries = self.settings.max_log_list_entries
                 logger.verbose(ignore_log.verbose_output(too_many_entries))
 
-            scan_name = "CI scan" if self.is_ci_invocation else "Scan"
-            success_line = (
-                f"❌ {scan_name} failed: {scan_failure_reason}"
-                if scan_failure_reason
-                else f"✅ {scan_name} completed successfully."
+            success_line = "✅ " + (
+                "CI scan completed successfully."
+                if self.is_ci_invocation
+                else "Scan completed successfully."
             )
             output_text = (
                 success_line
