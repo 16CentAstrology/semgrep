@@ -35,7 +35,6 @@ from semdep.external.packaging.specifiers import InvalidSpecifier  # type: ignor
 from semdep.external.packaging.specifiers import SpecifierSet  # type: ignore
 from semdep.matchers.gradle import GradleMatcher
 from semdep.package_restrictions import dependencies_range_match_any
-from semdep.package_restrictions import dependency_match_key
 from semdep.package_restrictions import is_in_range
 from semdep.package_restrictions import is_unpinned_version
 from semgrep.dependency_path import DependencyParentIndex
@@ -278,9 +277,7 @@ class SubprojectDependencyIndex:
         deps = list(iter_found_dependencies(subproject.resolved_dependencies))
         subproject_index: dict[str, list[out.FoundDependency]] = defaultdict(list)
         for dependency in deps:
-            subproject_index[
-                dependency_match_key(dependency.ecosystem, dependency.package)
-            ].append(dependency)
+            subproject_index[dependency.package].append(dependency)
 
         return cls(
             subproject_index,
@@ -298,13 +295,11 @@ class SubprojectDependencyIndex:
         Yields matches to the given sca patterns using the index to compute them.
         """
         for pattern in sca_patterns:
-            key = dependency_match_key(pattern.ecosystem, pattern.package)
-            candidates = self.index.get(key, [])
+            candidates = self.index.get(pattern.package, [])
             for candidate in candidates:
                 if (
                     pattern.ecosystem == candidate.ecosystem
-                    and dependency_match_key(candidate.ecosystem, candidate.package)
-                    == key
+                    and pattern.package == candidate.package
                     and is_in_range(
                         pattern.ecosystem, pattern.semver_range, candidate.version
                     )
@@ -581,8 +576,7 @@ def generate_reachable_sca_findings(
                         break
 
                 pattern_deps = set(
-                    dependency_match_key(dep_pattern.ecosystem, dep_pattern.package)
-                    for dep_pattern in depends_on_entries
+                    dep_pattern.package for dep_pattern in depends_on_entries
                 )
 
                 # The packages the rule searches for that are present as direct
@@ -593,10 +587,9 @@ def generate_reachable_sca_findings(
                 # so with Gradle module attribution a direct copy in another
                 # module does not suppress this module's transitive copy.
                 direct_pattern_packages = {
-                    dependency_match_key(found_dep.ecosystem, found_dep.package)
+                    found_dep.package
                     for found_dep in deps
-                    if dependency_match_key(found_dep.ecosystem, found_dep.package)
-                    in pattern_deps
+                    if found_dep.package in pattern_deps
                     and found_dep.transitivity.value == out.Direct()
                 }
                 # The subset whose direct copy names a definitive installed
@@ -607,10 +600,9 @@ def generate_reachable_sca_findings(
                 # requirements.txt would hide a reachable finding on a
                 # vulnerable transitive `foo` that was reported before.
                 pinned_direct_pattern_packages = {
-                    dependency_match_key(found_dep.ecosystem, found_dep.package)
+                    found_dep.package
                     for found_dep in deps
-                    if dependency_match_key(found_dep.ecosystem, found_dep.package)
-                    in pattern_deps
+                    if found_dep.package in pattern_deps
                     and found_dep.transitivity.value == out.Direct()
                     and not is_unpinned_version(found_dep.version)
                 }
@@ -658,14 +650,11 @@ def generate_reachable_sca_findings(
                     # A direct copy of the matched package itself only counts
                     # when it is pinned; a direct copy of any other package the
                     # rule searches for counts whatever its version.
-                    found_key = dependency_match_key(
-                        found_dep.ecosystem, found_dep.package
-                    )
                     other_direct_pattern_packages = direct_pattern_packages - {
-                        found_key
+                        found_dep.package
                     }
                     if found_dep.transitivity.value == out.Transitive() and (
-                        found_key in pinned_direct_pattern_packages
+                        found_dep.package in pinned_direct_pattern_packages
                         or other_direct_pattern_packages
                     ):
                         continue

@@ -59,10 +59,7 @@ let cleanup (t : t) : unit =
 let to_exn : error -> exn = function
   | IO { path; reason } ->
       Failure (spf "Failed to read/write %s: %s" !!path reason)
-  (* [Serde] is used for marshalling as well as unmarshalling failures, and
-     some callers reuse it for unrelated errors (e.g. exceptions in parallel
-     jobs), so don't claim that unmarshalling failed. *)
-  | Serde msg -> Failure (spf "Disk cache error: %s" msg)
+  | Serde msg -> Failure (spf "Failed to unmarshal cached value: %s" msg)
 
 let unwrap : ('a, error) result -> 'a = function
   | Ok a -> a

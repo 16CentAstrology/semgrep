@@ -1503,7 +1503,6 @@ let test_CLI_conf ~test ~target_roots ~config ~json ~optimizations
           json;
           optimizations;
           ignore_todo = test_ignore_todo;
-          override_expectations = None;
           common;
           matching_diagnosis = false;
         }
