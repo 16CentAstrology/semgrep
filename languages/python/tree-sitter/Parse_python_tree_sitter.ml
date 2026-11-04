@@ -41,6 +41,25 @@ let no_ctx = Param
 let fb = Tok.unsafe_fake_bracket
 let invalid () = raise (Tok.NoTokenLocation "Invalid program")
 
+(* The upstream tree-sitter scanner accepts broader flag combinations, but
+ * Python f-strings only allow f, fr, and rf prefixes (case-insensitively).
+ * Keep this check exact so invalid forms such as ff, fb, or uf do not become
+ * valid simply because the scanner saw an f flag.
+ *)
+let is_f_string_start tok =
+  let s = Tok.content_of_tok tok |> String.lowercase_ascii in
+  let is_quote = function
+    | '\''
+    | '"' ->
+        true
+    | _ -> false
+  in
+  let len = String.length s in
+  (len >= 2 && s.[0] = 'f' && is_quote s.[1])
+  || len >= 3
+     && ((s.[0] = 'f' && s.[1] = 'r') || (s.[0] = 'r' && s.[1] = 'f'))
+     && is_quote s.[2]
+
 (* AST builders helpers
  * less: could be moved in AST_Python.ml to factorize things with
  * parser_python.mly
@@ -1119,8 +1138,7 @@ and map_primary_expression (env : env) (x : CST.primary_expression) : expr =
       name_of_id id
   | `Str x -> (
       let t1, s, t2 = map_string_ env x in
-      let l = Tok.content_of_tok t1 in
-      if String.starts_with "f" l then InterpolatedString (t1, s, t2)
+      if is_f_string_start t1 then InterpolatedString (t1, s, t2)
       else
         match s with
         | [] -> Literal (Str ("", t1))
@@ -2053,17 +2071,26 @@ and map_except_clause (env : env) ((v1, v2, v3, v4) : CST.except_clause) :
           | e -> (Some (map_expression env e), None)
         in
         match (v2, aspat) with
-        | Some (t, v2), None ->
-            let _t =
-              match t with
-              | `As tok -> (* "as" *) token env tok
-              (* This is not legal in Python 3. There must be a tuple around this.
-                  https://peps.python.org/pep-3110/#grammar-changes
-              *)
-              | `COMMA tok -> (* "," *) token env tok
-            in
-            let v2 = map_expression env v2 in
-            (v1, id_opt_of_expr v2)
+        | Some (t, v2), None -> (
+            let e2 = map_expression env v2 in
+            match t with
+            | `As tok ->
+                let _t = (* "as" *) token env tok in
+                (v1, id_opt_of_expr e2)
+            (* PEP 758 (Python 3.14): 'except A, B:' is 'except (A, B):', a
+               tuple of types with no name bound (Python 2 read it as 'as').
+               coupling: the excepthandler rule in Parser_python.mly.
+               TODO: the vendored grammar accepts a single comma, so
+               'except A, B, C:' still fails here (upstream uses commaSep1).
+            *)
+            | `COMMA tok ->
+                let _t = (* "," *) token env tok in
+                let ty =
+                  match v1 with
+                  | Some e1 -> Some (Tuple (CompList (fb [ e1; e2 ]), no_ctx))
+                  | None -> Some e2
+                in
+                (ty, None))
         (* It would be really weird for there to be this `as` after the other `as`.
            Let's just ignore one.
         *)
