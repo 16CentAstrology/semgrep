@@ -6,6 +6,270 @@
 
 <!-- insertion point -->
 
+## [1.183.0](https://github.com/semgrep/semgrep/releases/tag/v1.183.0) - 2026-10-29
+
+### ### Added
+
+- The `--help` output of `semgrep` subcommands now includes a "THIRD-PARTY
+  LICENSES" section linking to the licenses and notices for Semgrep's open
+  source dependencies at https://semgrep.dev/cli-credits. (cli-credits)
+- Pro: Supply Chain now records which Go module requires which when dependency paths are enabled and local builds are allowed, so transitive Go findings can show the dependency path. (SC-4268)
+
+### ### Changed
+
+- Semgrep no longer ships binaries for Intel Macs; 1.182 is the last release that supports them. On Intel Macs, use the `semgrep/semgrep` Docker image; on Apple Silicon, use a native arm64 Python. (drop-intel-macos)
+- Speed up scans with many rules that share file prefilter conditions by checking each condition once per file. (prefilter-predicate-memo)
+- semgrep ci `--no-suppress-errors` now exits with code 2 (instead of 0) when dependency resolution fails for a subproject while local builds are allowed (--allow-local-builds): a build or package manager command fails, a lockfile cannot be parsed at all, or a build succeeds but reports an incomplete dependency list (for example, a registry refused a request). The affected dependency sources are listed in the scan output and the scan no longer reports that it completed successfully. Findings from the other subprojects are still reported. The default behavior, where errors are suppressed, is unchanged, and so is any scan without --allow-local-builds. Semgrep Managed Scanning scans are not affected. (SC-3613)
+- bash grammar update (v0.25.1):
+
+  - Bash arithmetic (`$(( ))`, `$[ ]`, `(( ))`, C-style `for` headers) is now translated into operator trees with bash precedence, so patterns such as `$(( $X * 2 ))` match structurally. `$((...))` is no longer confused with `$(...)`.
+  - Bash patterns accept a lone `...` before `done`, `fi` or `}`, e.g. `while ...; do ... done`, and `until` loops now parse as loops.
+  - Bash words containing `#` (`x=foo#bar`) are no longer truncated, and arguments after a redirect or heredoc delimiter stay with their command.
+  - Many Bash constructs that failed to parse now parse, e.g. `$[ ]`, `time ( ... )`, extglob in `case` and `[[ ]]`, and `if` function bodies.
+
+  (bash-v0.25.1)
+- clojure grammar update (v0.0.13):
+
+  - Clojure source parsing now accepts reader-evaluated metadata, such as ^#=(keyword "a") [1 2], including the legacy #^ prefix. Semgrep does not execute reader evaluation, and metadata remains ignored during matching.
+  - Clojure source parsing now supports reader conditionals inside symbolic values, such as ## #?(:clj Inf :cljs NaN), retaining the conditional branches without evaluating them.
+
+  (clojure-v0.0.13)
+- swift grammar update (0.5.0):
+
+  - Swift parsing now supports type and value parameter packs, including each/repeat expansions and pack constraints.
+  - Swift parsing now supports if and switch expressions used as variable initializers.
+  - Swift parsing now supports macro declarations with typed signatures and #externalMacro definitions. This does not implement macro expansion.
+  - Swift property observers now retain their willSet/didSet bodies and parameters separately from property initializers.
+  - Swift parsing now supports borrowing, consuming, package, and distributed modifiers while preserving their distinct spellings.
+  - Swift parsing now supports #unavailable conditions and distinguishes them from #available conditions. Both are mapped as `#…` expression nodes (not boolean `Not`) so patterns like `if !$X` do not match availability checks.
+  - Swift parsing now supports member access on parenthesized existential types, such as (any P).self, and preserves the underlying parenthesized existential or opaque type.
+  - Swift parsing now supports references to the bitwise AND operator using (&).
+
+  (swift-0.5.0)
+
+### ### Fixed
+
+- The Cursor hooks installed by `semgrep mcp` now track edited files separately for each Cursor conversation, so one window's stop scan no longer scans or discards another conversation's edits. (mcp-hook-cache-per-conversation)
+- The `semgrep mcp` server's `semgrep_scan` tool now only scans files inside the client's workspace root, or the server's working directory when the client reports none. Set `SEMGREP_MCP_ALLOW_SCAN_OUTSIDE_WORKSPACE=true` to scan files outside it. (mcp-scan-workspace-roots)
+- Interfile scans no longer fail with `Failure: Failed to unmarshal cached
+  value: Exception during parallelization: Exception.Timeout(...)` when a
+  taint configuration timeout fires at an unlucky moment. The timeout now only
+  skips the affected rule and file, as intended. (CODE-9810)
+- The Semgrep source distribution on PyPI is once again published with provenance. (CODE-10070)
+- Update certificate trust in Semgrep and its container images to address the eMudhra certificate authority compromise. Disable curl-based telemetry on macOS and Windows; default telemetry and scanning remain available. (INCID-521)
+- Supply Chain: multi-document pnpm-lock.yaml files (written by pnpm 11+) are
+  now parsed instead of reporting zero dependencies. A lockfile that fails to
+  parse now marks its subproject as unresolved rather than resolved with zero
+  dependencies. (SC-3870)
+- Supply Chain now parses go.mod files that contain a `godebug ( ... )` block. Such files used to report no dependencies and a parse error. (SC-4268)
+- Supply Chain now finds the direct dependencies of Poetry projects that declare them in the `[project] dependencies` table (Poetry 2.0 and later), in dependency groups or as extras, instead of reporting every package with unknown transitivity. Packages from Poetry dependency groups are now reported as direct. PyPI rule matching now ignores differences in case, `-`, `_` and `.` in package names, so rules match however a lockfile spells the name. (SC-4278)
+- Supply Chain now parses yarn.lock files generated by yarn 0.16 and earlier, whose header has no blank line after `# yarn lockfile v1`. Previously these failed with "Failed to parse yarn.lock at 1:1" and no dependencies were analyzed. (SC-4286)
+- Recognize all valid Python f-string prefixes without accepting invalid prefix combinations. (gh-11913)
+
+### ### Infra/Release Changes
+
+- Apply external rule-test expectations consistently in CLI and OCaml CI tests. (rule-expectation-ci)
+- Add --override-expectations to the OCaml rule test runner to replace expected finding lines for individual targets, rules, and engines from an external JSON file. (rule-test-expectations)
+
+
+## [1.182.1](https://github.com/semgrep/semgrep/releases/tag/v1.182.1) - 2026-10-22
+
+### ### Fixed
+
+- Update certificate trust in Semgrep and its container images to address the eMudhra certificate authority compromise. Disable curl-based telemetry on macOS and Windows; default telemetry and scanning remain available. (INCID-521)
+
+
+## [1.182.0](https://github.com/semgrep/semgrep/releases/tag/v1.182.0) - 2026-10-20
+
+### ### Added
+
+- Added Objective-C language support (`objc`, alpha): tree-sitter based parsing of `.m` files with semgrep pattern syntax (metavariables, ellipsis in argument/statement/message-keyword positions, deep ellipsis), enabling search-mode and taint-mode rules on Objective-C code. Message sends, blocks, control flow, class/method definitions, and Objective-C literals are modeled; remaining constructs parse and degrade gracefully. Objective-C++ (`.mm`) support will follow separately. (gh-9265)
+
+### ### Changed
+
+- c-sharp-pro grammar update (v0.23.1):
+
+  - C# (Pro) parsing and rule patterns now support Unicode escape sequences in identifiers (e.g. x\u0062), and matching follows C# identifier equality: `@class`, `cl\u0061ss`, and `class` (or `a\u200Cb` and `ab`) are the same name.
+  - C# (Pro) now parses identifiers using Unicode XID characters such as `℘` (U+2118) and `·` (U+00B7), and still accepts formatting characters (e.g. soft hyphen) inside identifiers.
+
+  (c-sharp-pro-v0.23.1)
+- hcl grammar update (v1.2.0):
+
+  - Terraform target parsing now supports namespaced function calls such as provider::local::fn(...).
+  - Terraform parsing now represents conditional and loop template directives with their conditions, binders, and bodies.
+  - Terraform parsing now binds attribute and index traversal more tightly than unary operators.
+
+  (hcl-v1.2.0)
+- lua grammar update (v0.5.0):
+
+  - Lua parsing now supports Lua 5.4 variable attributes and Lua 5.5 leading attributes, global declarations, and named vararg parameters.
+  - Lua parsing now accepts Unicode identifiers, hashbang lines, and additional numeric forms including LuaJIT binary, LL/ULL, and imaginary literals.
+  - Lua AST conversion now preserves elseif branches in source order, including when an else branch is present, and correctly retains member-assignment receivers and colon-method declaration names.
+  - Lua string ASTs now separate single-quoted and long-bracket delimiters from their content, consistently with double-quoted strings. Escape contents remain uninterpreted.
+  - Lua parsing now handles builtin names such as next as ordinary callable identifiers.
+
+  (lua-v0.5.0)
+
+### ### Fixed
+
+- Fix C++ range-based for loops with structured bindings so they parse and preserve findings in the rest of the file. (CODE-10028)
+- Python only: a `requirements.txt` line declared as a version range or bare name is now reported as a direct dependency even when a `requirements.in` manifest is present. Such a line can only have been written by hand, since `pip-compile` emits exact pins, so it is a direct declaration regardless of whether the manifest names the package. Exact pins keep using the manifest to decide between direct and transitive. (SC-4242)
+
+### ### Infra/Release Changes
+
+- Update the bundled Tree-sitter Elixir grammar to v0.3.5 and regenerate its parser with Tree-sitter 0.26.3; no language syntax changes. (elixir-v0.3.5)
+
+
+## [1.181.1](https://github.com/semgrep/semgrep/releases/tag/v1.181.1) - 2026-10-22
+
+### ### Fixed
+
+- Update certificate trust in Semgrep and its container images to address the eMudhra certificate authority compromise. Disable curl-based telemetry on macOS and Windows; default telemetry and scanning remain available. (INCID-521)
+
+
+## [1.181.0](https://github.com/semgrep/semgrep/releases/tag/v1.181.0) - 2026-10-14
+
+### ### Changed
+
+- `semgrep scan` now uses the same asynchronous configuration generation and retries as `semgrep ci` when fetching platform scan configurations. (CODE-9930)
+- Python only: Supply Chain now reports every package declared in a `requirements.txt`, not only the ones pinned with `==`. A requirement with a version range (`requests>=2.0`, `numpy~=1.26`, `django==2.2.*`, `requests (>=2.0)`) is reported with the declared specifier as its version, and a bare name (`flask`) is reported with an empty version, so they appear in the dependency inventory and SBOM instead of being dropped with a "not pinned to an exact version" parse error. These dependencies have no definitive installed version, so for now they produce no Supply Chain findings. When there is no `requirements.in` manifest to consult, a range or bare-name line is reported as a direct dependency, since it was declared by hand rather than written by a resolver; exact pins keep their previous unknown transitivity. Local path and URL lines are no longer reported as parse errors, while a line whose leading token is not a valid package name (`requests$foo>=1`) is now reported as a parse error instead of being dropped silently. Other ecosystems and other Python manifest formats are unchanged. (SC-3487)
+- pro: Various performance improvements for historical secrets scanning. (SCRT-983-historical-performance)
+- go grammar update (v0.23.4):
+
+  - Go target parsing now supports composite type-set constraints and shorthand union constraints on type parameters, preserving underlying-type markers and all union members. Literal generic rule-pattern syntax remains unchanged.
+  - Go target parsing now supports embedded generic struct fields, including pointer and package-qualified embeddings, while retaining their type arguments.
+  - Go target parsing now supports standalone generic function instantiations with multiple or composite type arguments, such as Pair[int, string] and Identity[[]int], including qualified function names.
+  - Go target parsing now accepts Unicode decimal digits after the first character of an identifier, including Arabic-Indic and Devanagari digits.
+
+  (go-v0.23.4)
+- Hack grammar update:
+
+  - Hack target parsing now supports capability lists on functions, methods, function types, lambdas, and anonymous functions, including empty lists and context-dependent capabilities.
+  - Hack target parsing now supports context constants with capability bounds or initializers, preserving the distinction between super bounds, as bounds, and assigned capabilities. Unbounded abstract context constants retain their existing representation limitation.
+  - Hack target parsing now supports concrete and abstract enum classes with typed members, plus qualified and unqualified enum class labels.
+  - Hack target parsing now supports function and static-method references with empty or explicit type arguments, such as foo<> and MyClass::bar<int>.
+  - Hack target parsing now preserves type arguments on calls and constructors such as foo<int>(), $obj->bar<int>(...), and new MyClass<int>(...), matching other languages' typed-call representation.
+  - Hack target parsing now supports expression-tree literals such as Example`1 + 2`, preserving the visitor and body text. Embedded DSL bodies remain opaque rather than being parsed as Hack expressions.
+  - Hack target parsing now supports file-level attributes such as <<file: SomeAttribute(...)>>, preserving attribute names and arguments.
+  - Hack target parsing now supports internal visibility on methods and properties, keeping it distinct from public, protected, and private visibility.
+  - Hack target parsing now accepts namespace-relative names such as namespace\run() and include/require member names in piped expressions.
+
+  (hack-1a7ded90288189746c54861ac144ede97df95081)
+
+### ### Fixed
+
+- pro: Historical secrets scanning no longer aborts when preparatory `git gc`
+  fails. (SCRT-982-historical-gc-nonfatal)
+- Supply Chain: lockfileless Gradle resolution now tells the dependency graph
+  plugin where to write its report, so builds that relocate their build
+  directory resolve instead of failing. When the plugin writes no report, the
+  scan reports a resolution error that includes the Gradle log instead of
+  crashing on the missing file. (code-9953)
+- Supply Chain: lockfileless Gradle and Maven scans now report incomplete
+  dependency resolution when dependencies or transitive metadata cannot be
+  resolved. Registry HTTP failures include the affected URL when available. (sc-3358)
+
+### ### Infra/Release Changes
+
+- Forward optional job context when registering CLI scans. (SMS-3333)
+
+
+## [1.180.0](https://github.com/semgrep/semgrep/releases/tag/v1.180.0) - 2026-10-07
+
+### ### Added
+
+- Promoted Dart to GA maturity. Pattern matching for Dart now supports type inference for typed declarations (id_type propagation), boolean operator typing (`&&`/`||` as bool), alias-aware import equivalence (a pattern like `http.get(...)` matches code that imports `package:http/http.dart` under any local alias), method-chain ellipsis (`obj.foo(). ... .bar()`), multi-statement patterns (e.g. `$V = get(); ...; eval($V);`), and class-body ellipsis (`class $X { ... }`). (dart-ga-types-equivalences)
+
+### ### Changed
+
+- Removed support for the QL language (the CodeQL query language): `--lang ql` and the `ql` language key in rules, and parsing of `.ql` and `.qll` targets, are no longer available. (remove-ql)
+
+### ### Fixed
+
+- Traced scans using the default parallelism mode no longer hang when the telemetry endpoint is unresponsive or unreachable. (CODE-9946)
+- Updated the bundled `anyio` (4.12.1 to 4.14.2) and `urllib3` (2.6.3 to 2.8.0)
+  dependencies to versions with fixes for known security advisories. (deps-anyio-urllib3)
+
+
+## [1.179.0](https://github.com/semgrep/semgrep/releases/tag/v1.179.0) - 2026-10-01
+
+### ### Added
+
+- Semgrep Supply Chain now parses Bun `bun.lock` lockfiles (text format, `lockfileVersion` 1) paired with a `package.json` manifest, including the dependency relationships between packages. The deprecated binary `bun.lockb` format is still unsupported. (SC-2419)
+
+### ### Changed
+
+- Pro: Stabilize file processing order in inter-file analysis, which was previously arbitrary but deterministic. We believe this is very unlikely to affect findings but there is a theoretical path by which it could in certain rare cases. (stabilize)
+- c grammar update (v0.24.2):
+
+  - No verified user-facing improvements: Agent feature assessment was not run for this grammar.
+
+  (c-v0.24.2)
+- cpp grammar update (v0.23.4):
+
+  - C++ target parsing now supports attributes on namespace definitions and preserves their arguments in the AST.
+  - C++ target parsing now supports reference typedef declarators, including references to arrays and functions.
+  - C++ target parsing now supports C++20 lambda pack init-captures such as [...values = args] and [&...values = args]. Capture-sensitive matching remains an existing limitation.
+  - C++ target parsing now supports GNU inline-assembly output operands that are expressions, including pointer dereferences and array accesses.
+  - C++ target parsing now supports composite type arguments in alignas declarations, such as alignas(int *), while preserving the alignment argument.
+  - C++ target parsing now accepts single-digit hexadecimal escapes in string literals, such as "\xA", while retaining support for longer hexadecimal escapes.
+
+  (cpp-v0.23.4)
+- Update the html grammar to v0.23.2. (html-v0.23.2)
+- r grammar update (v1.3.0):
+
+  - R target parsing now supports unary and binary help expressions (?) and exponentiation written with **.
+  - R target parsing correctly represents hexadecimal fractional and exponent literals, including imaginary forms, and decimal or exponent notation with the L suffix.
+  - R target parsing now supports quoted namespace and slot names, such as "base"::"mean" and x@"slot".
+  - R parsing preserves else branches placed on a new line within braced expressions.
+  - R string parsing preserves literal newlines and excludes raw-string delimiters from string values. Short hexadecimal and Unicode escape spellings are accepted; escape decoding remains unchanged.
+  - R parsing preserves omitted argument positions in calls and subscripts, and retains the indexed expression for single-index subscripts.
+
+  (r-v1.3.0)
+- sfapex grammar update (v2.3):
+
+  - Apex target parsing now supports null-coalescing expressions using ??, preserving both operands.
+  - Apex target parsing now supports DML operations with explicit as user and as system security modes, retaining the mode, operation targets, and optional upsert key.
+  - Apex target parsing now supports numeric package-version expressions such as Package.Version.1.2.
+  - Apex target parsing now recognizes the webservice modifier and annotations with empty argument lists.
+  - Apex target parsing now accepts whitespace within relational and shift operators, including compound shift assignments.
+  - Embedded SOQL parsing in Apex now supports dotted TYPEOF operands, functions such as convertTimezone, and HAVING comparisons on grouped fields.
+  - Apex target parsing now supports multiple top-level method declarations followed by executable statements in anonymous Apex.
+  - Apex parsing now preserves native java: qualifiers on types and supports java:-prefixed field-access expressions.
+  - Apex patterns now distinguish safe navigation (?.) from ordinary field and method access (.).
+
+  (sfapex-v2.3)
+
+### ### Fixed
+
+- Python: `except A, B:` and `except A, B, C:` (PEP 758, Python 3.14) and the
+  `except*` forms of both are now parsed as a tuple of exception types, like
+  `except (A, B):`, rather than as the Python 2 `except A as B:` or a parse
+  error. `except*` is now handled by Semgrep's primary Python parser too, so
+  exception groups no longer depend on the fallback parser. Note that Python
+  2's `except A, e:` is no longer read as `except A as e:`, even for `python2`.
+  One limitation remains: the vendored tree-sitter Python grammar still accepts
+  only a single comma, so `except A, B, C:` is still a parse error there. The
+  menhir parser runs first and handles it, so this only surfaces if the
+  tree-sitter fallback is reached; upgrading the vendored grammar is follow-up
+  work. (gh-11906)
+- Fix Dockerfile parsing for environment-expanded `EXPOSE` ports with TCP/UDP protocols. (gh-11934)
+- Semgrep now allows PyJWT 2.15 and later (`pyjwt[crypto]>=2.15.0,<3`) instead of
+  pinning `~=2.13.0`, so installs pick up a PyJWT release with fixes for known
+  vulnerabilities, and projects that require a newer PyJWT can install Semgrep. (gh-11953)
+
+
+## [1.178.0](https://github.com/semgrep/semgrep/releases/tag/v1.178.0) - 2026-09-23
+
+### ### Changed
+
+- The bundled tree-sitter C runtime is now 0.26.3. (CODE-9425)
+
+### ### Fixed
+
+- Fixed an occasional hang when `semgrep-core` exited on Windows. (windows-hang)
+
+
 ## [1.177.0](https://github.com/semgrep/semgrep/releases/tag/v1.177.0) - 2026-09-10
 
 ### ### Added
