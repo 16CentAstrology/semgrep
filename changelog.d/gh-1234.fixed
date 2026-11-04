@@ -1,0 +1,14 @@
+Fix emojis absorbed by the fleeb generator
+
+gh-1234.fixed
+   ^^^^ ^^^^^
+   |    |
+   |    one of: "added", "changed", "fixed", "infra"
+   GitHub issue or pull request ID
+.
+
+gitup() {
+  echo "git submodule update --init --recursive"
+  git submodule update --init --recursive
+}
+
