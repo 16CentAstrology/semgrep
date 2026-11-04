@@ -175,6 +175,7 @@ retest:
 # (root `ots-test-ocaml` and `ots-test-python` targets).
 .PHONY: test-all
 test-all:
+	$(MAKE) test-scripts
 	$(MAKE) core-test
 	$(MAKE) -C cli test
 	$(MAKE) -C cli osempass
@@ -209,18 +210,6 @@ core-test:
 # TODO: this generates weird cmdliner errors in Windows
 	./test --help 2>&1 >/dev/null
 	./scripts/run-core-test
-
-# Smoke subset of the OCaml test suite: only the tests tagged 'smoke' in
-# src/tests/Test.ml. Used on slower CI platforms (e.g. osx x86) to catch
-# platform-specific breakage without running the full suite. We bypass
-# run-core-test (and its extra inline/expect runs) to keep this lean.
-# coupling: the root Makefile's test-osx-smoke target.
-.PHONY: core-test-smoke
-core-test-smoke:
-	./scripts/make-symlinks
-	$(MAKE) build-core-test
-	./test --help 2>&1 >/dev/null
-	./test --max-inline-log-bytes=100_000 -t smoke
 
 # Please keep this standalone target.
 # We want to rebuild the tests without re-running all of them.
@@ -313,7 +302,7 @@ test-grammar-%: grammar-tools
 # coupling: keep this commit in sync with opam_repository_pin in
 # .github/workflows/libs/semgrep.libsonnet
 #
-OPAM_REPOSITORY_PIN = git+https://github.com/ocaml/opam-repository.git\#78d29aba187e8362b8ab86c189790c0af9153d4b
+OPAM_REPOSITORY_PIN = git+https://github.com/ocaml/opam-repository.git\#922f67e068446a8d8e809a40251a259bd0549552
 
 # Extra flags forwarded to 'opam init' by 'opam-init'. The Dockerfiles pass
 # '--disable-sandboxing' since containers can't use the bubblewrap sandbox.
@@ -528,3 +517,8 @@ check_with_docker:
 dev:
 	$(MAKE) core
 	$(MAKE) copy-core-for-cli
+
+# Script tests include local Git repositories and require Git LFS.
+.PHONY: test-scripts
+test-scripts:
+	uv run --project cli --locked pytest scripts/tests
