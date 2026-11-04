@@ -55,6 +55,10 @@ PTT_DYNAMIC_RESOLUTION_SUBPROJECT_KINDS: List[SubprojectKind] = [
         out.ManifestKind(out.Pipfile()),
         out.LockfileKind(out.PipfileLock()),
     ),
+    (
+        out.ManifestKind(out.GoModManifest()),
+        out.LockfileKind(out.GoModLock()),
+    ),
 ]
 
 # Subproject kinds that we use ocaml parsers for only when transitive reachability is
@@ -75,6 +79,7 @@ ALWAYS_OCAML_PARSER_SUBPROJECT_KINDS: List[SubprojectKind] = [
     (None, out.LockfileKind(out.NpmPackageLockJson())),
     (out.ManifestKind(out.PackageJson()), out.LockfileKind(out.NpmPackageLockJson())),
     (out.ManifestKind(out.PyprojectToml()), out.LockfileKind(out.UvLock())),
+    (out.ManifestKind(out.PyprojectToml()), out.LockfileKind(out.PoetryLock())),
     (out.ManifestKind(out.PackageJson()), out.LockfileKind(out.BunLock())),
 ]
 
